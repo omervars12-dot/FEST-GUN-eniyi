@@ -29,7 +29,7 @@ function save() {
 
 const BOT_ADI = 'Fest Gun';
 const TOKEN = process.env.DISCORD_TOKEN;
-const GUILD_ID = process.env.GUILD_ID; // doluysa komutlar anında görünür
+const GUILD_ID = process.env.GUILD_ID; //1542644935172292608
 const MESAI_KANAL_ID = process.env.MESAI_KANAL_ID || '1554566189391552554';
 const LOGO_URL = process.env.LOGO_URL || null;
 const SES_KANAL_ID = process.env.SES_KANAL_ID || '1542872463870922814';
