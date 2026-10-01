@@ -10,7 +10,7 @@ const {
   Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, PermissionFlagsBits,
   MessageFlags, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder,
   ChannelType, ActivityType, ButtonBuilder, ButtonStyle, AttachmentBuilder,
-  UserSelectMenuBuilder, StringSelectMenuBuilder,
+  UserSelectMenuBuilder, StringSelectMenuBuilder, AuditLogEvent,
 } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
@@ -33,6 +33,7 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const GUILD_ID = process.env.GUILD_ID; // doluysa komutlar anında görünür
 const MESAI_KANAL_ID = process.env.MESAI_KANAL_ID || '1554566189391552554';
 const KURUCU_ID = process.env.KURUCU_ID || null; // sunucu sahibi dışında panel açabilecek ekstra kişi (opsiyonel)
+const BAN_LOG_KANAL_ID = process.env.BAN_LOG_KANAL_ID || '1542872504291561634';
 const BAN_LIMIT = 5; // 1 saatte en fazla banlanacak kişi sayısı
 // logo.png yoksa bot çökmesin, logosuz çalışsın
 const LOGO_YOLU = path.join(__dirname, 'logo.png');
@@ -46,7 +47,7 @@ if (!TOKEN) {
 }
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildVoiceStates],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildModeration],
 });
 
 /* ------------------------- Yardımcılar ------------------------- */
@@ -398,6 +399,37 @@ client.on('interactionCreate', async (i) => {
 });
 
 /* ------------------------- DM Duyuru ------------------------- */
+/* ------------------------- Ban Logu ------------------------- */
+const panelBanlari = new Set(); // panelden atılan banlar (çift log olmasın)
+
+async function banLogGonder(embed) {
+  try {
+    const ch = await client.channels.fetch(BAN_LOG_KANAL_ID);
+    if (ch?.isTextBased()) await ch.send({ embeds: [embed] });
+    else console.error('Ban log kanalı bulunamadı:', BAN_LOG_KANAL_ID);
+  } catch (e) { console.error('Ban log gönderilemedi:', e.message); }
+}
+
+// Panel dışında (sağ tık, başka bot vs.) atılan banları da logla
+client.on('guildBanAdd', async (ban) => {
+  try {
+    if (panelBanlari.has(ban.user.id)) return;
+    await new Promise((r) => setTimeout(r, 1500));
+    const b = ban.partial ? await ban.fetch().catch(() => ban) : ban;
+    const logs = await ban.guild.fetchAuditLogs({ type: AuditLogEvent.MemberBanAdd, limit: 5 }).catch(() => null);
+    const entry = logs?.entries.find((e) => e.target?.id === ban.user.id && Date.now() - e.createdTimestamp < 20000);
+    const embed = new EmbedBuilder().setColor(0xe74c3c).setTitle('🔨 Kullanıcı Yasaklandı')
+      .setThumbnail(ban.user.displayAvatarURL())
+      .addFields(
+        { name: 'Kullanıcı', value: `${ban.user.tag} (${ban.user.id})` },
+        { name: 'Yetkili', value: entry?.executor ? `<@${entry.executor.id}>` : 'Bilinmiyor', inline: true },
+        { name: 'Kaynak', value: 'Sunucu / Dışarıdan', inline: true },
+        { name: 'Sebep', value: (b.reason || entry?.reason || 'Belirtilmedi').slice(0, 1000) },
+      ).setTimestamp();
+    banLogGonder(embed);
+  } catch (e) { console.error('guildBanAdd hatası:', e.message); }
+});
+
 /* ------------------------- Ban Paneli ------------------------- */
 const SAAT = 3600e3;
 function banHakki() {
@@ -468,6 +500,7 @@ async function bilesenIslem(i) {
     if (red) return await i.reply({ content: `❌ ${red}`, flags: MessageFlags.Ephemeral });
     await i.deferReply({ flags: MessageFlags.Ephemeral });
     const user = await client.users.fetch(hedefId).catch(() => null);
+    panelBanlari.add(hedefId); setTimeout(() => panelBanlari.delete(hedefId), 30000);
     await i.guild.members.ban(hedefId, { reason: `${i.user.tag}: ${sebep}` });
     (data.banLog ||= []).push({ t: Date.now(), id: hedefId, yetkili: i.user.id });
     data.bans.push({ id: hedefId, tag: user?.tag || hedefId, yetkili: i.user.id, sebep, t: Date.now() });
@@ -482,6 +515,7 @@ async function bilesenIslem(i) {
         { name: 'Sebep', value: sebep },
       ).setTimestamp();
     await i.channel.send({ embeds: [embed] }).catch(() => {});
+    banLogGonder(EmbedBuilder.from(embed).addFields({ name: 'Kaynak', value: 'Ban Paneli', inline: true }));
     return await i.editReply(`✅ <@${hedefId}> yasaklandı. Kalan ban hakkı: **${h.kalan}/${BAN_LIMIT}**`);
   }
 
