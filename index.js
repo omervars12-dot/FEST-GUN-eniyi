@@ -9,7 +9,8 @@ try {
 const {
   Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, PermissionFlagsBits,
   MessageFlags, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder,
-  ChannelType, ActivityType,
+  ChannelType, ActivityType, ButtonBuilder, ButtonStyle, AttachmentBuilder,
+  UserSelectMenuBuilder, StringSelectMenuBuilder,
 } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
@@ -29,9 +30,11 @@ function save() {
 
 const BOT_ADI = 'Fest Gun';
 const TOKEN = process.env.DISCORD_TOKEN;
-const GUILD_ID = process.env.GUILD_ID; //1542644935172292608
+const GUILD_ID = process.env.GUILD_ID; // doluysa komutlar anında görünür
 const MESAI_KANAL_ID = process.env.MESAI_KANAL_ID || '1554566189391552554';
-const LOGO_URL = process.env.LOGO_URL || null;
+const KURUCU_ID = process.env.KURUCU_ID || null; // sunucu sahibi dışında panel açabilecek ekstra kişi (opsiyonel)
+const BAN_LIMIT = 5; // 1 saatte en fazla banlanacak kişi sayısı
+const logoDosya = () => new AttachmentBuilder(path.join(__dirname, 'logo.png'), { name: 'logo.png' });
 const SES_KANAL_ID = process.env.SES_KANAL_ID || '1542872463870922814';
 
 if (!TOKEN) {
@@ -94,14 +97,9 @@ const commands = [
         ))
       .addStringOption((o) => o.setName('ip').setDescription('Sunucu IP adresi').setRequired(true))),
 
-  new SlashCommandBuilder().setName('ban').setDescription('Kullanıcıyı yasakla')
-    .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers)
-    .addUserOption((o) => o.setName('kullanıcı').setDescription('Yasaklanacak kişi').setRequired(true))
-    .addStringOption((o) => o.setName('sebep').setDescription('Sebep')),
-
-  new SlashCommandBuilder().setName('unban').setDescription('Yasağı kaldır')
-    .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers)
-    .addStringOption((o) => o.setName('id').setDescription('Kullanıcı ID').setRequired(true)),
+  new SlashCommandBuilder().setName('ban').setDescription('Ban paneli (sadece kurucu açabilir)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addSubcommand((s) => s.setName('panel').setDescription('Ban / yasak kaldırma panelini aç')),
 
   new SlashCommandBuilder().setName('ban-sorgu').setDescription('Kullanıcının ban durumunu sorgula')
     .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers)
@@ -121,12 +119,6 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
     .addUserOption((o) => o.setName('kullanıcı').setDescription('Kişi').setRequired(true))
     .addRoleOption((o) => o.setName('rol').setDescription('Rol').setRequired(true)),
-
-  new SlashCommandBuilder().setName('oluşum-ekle').setDescription('Yeni oluşum (rol + kategori + kanallar) oluştur')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addStringOption((o) => o.setName('isim').setDescription('Oluşum adı').setRequired(true))
-    .addStringOption((o) => o.setName('renk').setDescription('Hex renk, örn: #ff0000'))
-    .addUserOption((o) => o.setName('lider').setDescription('Oluşum lideri')),
 
   new SlashCommandBuilder().setName('istatistik-bilgi').setDescription('Sunucu istatistiklerini göster'),
 
@@ -150,24 +142,36 @@ const commands = [
 ].map((c) => c.toJSON());
 
 /* ------------------------- Hazır ------------------------- */
-client.once('ready', async () => {
+let hazirMi = false;
+async function hazir() {
+  if (hazirMi) return;
+  hazirMi = true;
   console.log(`${BOT_ADI} giriş yaptı: ${client.user.tag}`);
+  console.log('Bot şu sunucularda:', client.guilds.cache.map((g) => `${g.name} (${g.id})`).join(', ') || 'HİÇBİRİNDE DEĞİL');
   client.user.setPresence({ activities: [{ name: '/sunucu • /mesai', type: ActivityType.Watching }] });
+
   try {
     if (GUILD_ID) {
-      await client.application.commands.set([], undefined); // global temizle (çift görünmesin)
-      await client.application.commands.set(commands, GUILD_ID);
-      console.log('Komutlar sunucuya kaydedildi (anında aktif).');
+      if (!client.guilds.cache.has(GUILD_ID)) {
+        console.error(`UYARI: Bot ${GUILD_ID} ID'li sunucuda değil! Botu sunucuya tekrar davet et (applications.commands izniyle).`);
+      }
+      await client.application.commands.set([]); // eski global komutları temizle (çift görünmesin)
+      const r = await client.application.commands.set(commands, GUILD_ID);
+      console.log(`✅ ${r.size} komut sunucuya kaydedildi.`);
     } else {
-      await client.application.commands.set(commands);
-      console.log('Komutlar global kaydedildi (görünmesi biraz sürebilir).');
+      const r = await client.application.commands.set(commands);
+      console.log(`✅ ${r.size} komut global kaydedildi (görünmesi 1 saate kadar sürebilir).`);
     }
-  } catch (e) { console.error('Komut kayıt hatası:', e); }
+  } catch (e) {
+    console.error('❌ Komut kayıt hatası:', e.code, e.message, JSON.stringify(e.rawError?.errors || {}));
+  }
 
   sesKanalinaGir();
   haftalikKontrol();
   setInterval(haftalikKontrol, 60 * 1000);
-});
+}
+client.once('clientReady', hazir);
+client.once('ready', hazir);
 
 /* ------------------------- Ses kanalında bekleme ------------------------- */
 async function sesKanalinaGir() {
@@ -220,8 +224,7 @@ async function haftalikKontrol() {
 /* ------------------------- Etkileşimler ------------------------- */
 client.on('interactionCreate', async (i) => {
   try {
-    if (i.isModalSubmit() && i.customId === 'dmduyuru_modal') return dmDuyuruGonder(i);
-    if (!i.isChatInputCommand()) return;
+    if (!i.isChatInputCommand()) return await bilesenIslem(i);
 
     const sub = i.options.getSubcommand(false);
 
@@ -248,27 +251,14 @@ client.on('interactionCreate', async (i) => {
           )
           .setFooter({ text: `${BOT_ADI} Moderation` })
           .setTimestamp();
-        if (LOGO_URL) embed.setThumbnail(LOGO_URL).setImage(LOGO_URL);
-        return i.reply({ embeds: [embed] });
+        embed.setThumbnail('attachment://logo.png');
+        return i.reply({ embeds: [embed], files: [logoDosya()] });
       }
 
       case 'ban': {
-        const user = i.options.getUser('kullanıcı');
-        const sebep = i.options.getString('sebep') || 'Sebep belirtilmedi';
-        const m = await i.guild.members.fetch(user.id).catch(() => null);
-        if (m && !m.bannable) return hata(i, 'Bu kullanıcıyı banlayamam (yetkim/rol sıram yetersiz).');
-        if (user.id === i.user.id) return hata(i, 'Kendini banlayamazsın.');
-        await i.guild.members.ban(user.id, { reason: `${i.user.tag}: ${sebep}` });
-        data.bans.push({ id: user.id, tag: user.tag, yetkili: i.user.id, sebep, t: Date.now() });
-        save();
-        return i.reply({ embeds: [new EmbedBuilder().setColor(0xe74c3c).setTitle('🔨 Kullanıcı Yasaklandı')
-          .addFields({ name: 'Kullanıcı', value: `${user.tag} (${user.id})` }, { name: 'Yetkili', value: `<@${i.user.id}>` }, { name: 'Sebep', value: sebep }).setTimestamp()] });
-      }
-
-      case 'unban': {
-        const id = i.options.getString('id').trim();
-        await i.guild.bans.remove(id, `${i.user.tag} tarafından kaldırıldı`).catch(() => { throw new Error('Bu ID banlı değil ya da geçersiz.'); });
-        return i.reply({ embeds: [new EmbedBuilder().setColor(0x2ecc71).setTitle('✅ Yasak Kaldırıldı').setDescription(`\`${id}\` kullanıcısının yasağı <@${i.user.id}> tarafından kaldırıldı.`).setTimestamp()] });
+        const kurucu = i.user.id === i.guild.ownerId || (KURUCU_ID && i.user.id === KURUCU_ID);
+        if (!kurucu) return hata(i, 'Bu paneli sadece sunucu kurucusu açabilir.');
+        return i.reply({ ...panelMesaji(), files: [logoDosya()] });
       }
 
       case 'ban-sorgu': {
@@ -307,29 +297,6 @@ client.on('interactionCreate', async (i) => {
         if (i.commandName === 'rolver') await m.roles.add(rol); else await m.roles.remove(rol);
         return i.reply({ embeds: [new EmbedBuilder().setColor(rol.color || 0x5865f2)
           .setDescription(`${i.commandName === 'rolver' ? '✅' : '➖'} <@${user.id}> kullanıcısına ${rol} rolü ${i.commandName === 'rolver' ? 'verildi' : 'alındı'}.`)] });
-      }
-
-      case 'oluşum-ekle': {
-        await i.deferReply();
-        const isim = i.options.getString('isim');
-        const renkStr = i.options.getString('renk');
-        const lider = i.options.getUser('lider');
-        const renk = renkStr && /^#?[0-9a-f]{6}$/i.test(renkStr) ? parseInt(renkStr.replace('#', ''), 16) : 0x5865f2;
-        const rol = await i.guild.roles.create({ name: isim, color: renk, mentionable: true, reason: `Oluşum: ${i.user.tag}` });
-        const kategori = await i.guild.channels.create({
-          name: `📁 ${isim}`, type: ChannelType.GuildCategory,
-          permissionOverwrites: [
-            { id: i.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
-            { id: rol.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.Connect, PermissionFlagsBits.Speak] },
-          ],
-        });
-        await i.guild.channels.create({ name: `${isim}-sohbet`, type: ChannelType.GuildText, parent: kategori.id });
-        await i.guild.channels.create({ name: `${isim} Ses`, type: ChannelType.GuildVoice, parent: kategori.id });
-        if (lider) { const lm = await i.guild.members.fetch(lider.id).catch(() => null); if (lm) await lm.roles.add(rol).catch(() => {}); }
-        data.olusumlar.push({ isim, rol: rol.id, kategori: kategori.id, lider: lider?.id || null, t: Date.now() });
-        save();
-        return i.editReply({ embeds: [new EmbedBuilder().setColor(renk).setTitle('🏴 Oluşum Oluşturuldu')
-          .addFields({ name: 'Oluşum', value: `${rol}`, inline: true }, { name: 'Lider', value: lider ? `<@${lider.id}>` : 'Yok', inline: true }, { name: 'Kanallar', value: 'Özel kategori, yazı ve ses kanalı açıldı.' }).setTimestamp()] });
       }
 
       case 'istatistik-bilgi': {
@@ -427,6 +394,132 @@ client.on('interactionCreate', async (i) => {
 });
 
 /* ------------------------- DM Duyuru ------------------------- */
+/* ------------------------- Ban Paneli ------------------------- */
+const SAAT = 3600e3;
+function banHakki() {
+  const now = Date.now();
+  data.banLog = (data.banLog || []).filter((x) => now - x.t < SAAT);
+  return {
+    kullanilan: data.banLog.length,
+    kalan: Math.max(0, BAN_LIMIT - data.banLog.length),
+    acilis: data.banLog[0] ? data.banLog[0].t + SAAT : null,
+  };
+}
+
+function panelMesaji() {
+  const h = banHakki();
+  const embed = new EmbedBuilder()
+    .setColor(0x1e6fff)
+    .setTitle('🔨 Fest Gun — Ban Paneli')
+    .setDescription('Aşağıdaki menüden bir kişi seç, sebebini yaz ve yasakla.\nYasağı kaldırmak için **Yasak Kaldır** butonunu kullan.')
+    .addFields(
+      { name: '⏳ Saatlik Limit', value: `**${h.kalan}/${BAN_LIMIT}** ban hakkı kaldı`, inline: true },
+      { name: '📜 Kural', value: `1 saatte en fazla **${BAN_LIMIT}** kişi banlanabilir.`, inline: true },
+    )
+    .setThumbnail('attachment://logo.png')
+    .setFooter({ text: 'Fest Gun Moderation' })
+    .setTimestamp();
+  const satir1 = new ActionRowBuilder().addComponents(
+    new UserSelectMenuBuilder().setCustomId('ban_user').setPlaceholder('🎯 Banlanacak kişiyi seç...').setMinValues(1).setMaxValues(1),
+  );
+  const satir2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('unban_liste').setLabel('Yasak Kaldır').setEmoji('✅').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('unban_id').setLabel('ID ile Yasak Kaldır').setEmoji('🔓').setStyle(ButtonStyle.Secondary),
+  );
+  return { embeds: [embed], components: [satir1, satir2] };
+}
+
+async function banKontrol(i, hedefId) {
+  const h = banHakki();
+  if (h.kalan <= 0) return `Saatlik ban limiti doldu (${BAN_LIMIT}/${BAN_LIMIT}). Yeni hak <t:${Math.floor(h.acilis / 1000)}:R> açılacak.`;
+  if (hedefId === i.user.id) return 'Kendini banlayamazsın.';
+  if (hedefId === client.user.id) return 'Beni banlayamazsın.';
+  if (hedefId === i.guild.ownerId || (KURUCU_ID && hedefId === KURUCU_ID)) return 'Kurucu banlanamaz.';
+  const m = await i.guild.members.fetch(hedefId).catch(() => null);
+  if (m && !m.bannable) return 'Bu kişiyi banlayamam (rolü benden üstte ya da yetkim yok).';
+  return null;
+}
+
+async function bilesenIslem(i) {
+  // DM duyuru formu
+  if (i.isModalSubmit() && i.customId === 'dmduyuru_modal') return dmDuyuruGonder(i);
+
+  // Ban: kişi seçildi -> sebep formu
+  if (i.isUserSelectMenu() && i.customId === 'ban_user') {
+    const hedefId = i.values[0];
+    const red = await banKontrol(i, hedefId);
+    if (red) return i.reply({ content: `❌ ${red}`, flags: MessageFlags.Ephemeral });
+    const modal = new ModalBuilder().setCustomId(`ban_modal_${hedefId}`).setTitle('Ban Sebebi');
+    modal.addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder().setCustomId('sebep').setLabel('Sebep').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(300),
+    ));
+    return i.showModal(modal);
+  }
+
+  // Ban formu gönderildi
+  if (i.isModalSubmit() && i.customId.startsWith('ban_modal_')) {
+    const hedefId = i.customId.slice('ban_modal_'.length);
+    const sebep = i.fields.getTextInputValue('sebep');
+    const red = await banKontrol(i, hedefId);
+    if (red) return i.reply({ content: `❌ ${red}`, flags: MessageFlags.Ephemeral });
+    await i.deferReply({ flags: MessageFlags.Ephemeral });
+    const user = await client.users.fetch(hedefId).catch(() => null);
+    await i.guild.members.ban(hedefId, { reason: `${i.user.tag}: ${sebep}` });
+    (data.banLog ||= []).push({ t: Date.now(), id: hedefId, yetkili: i.user.id });
+    data.bans.push({ id: hedefId, tag: user?.tag || hedefId, yetkili: i.user.id, sebep, t: Date.now() });
+    save();
+    const h = banHakki();
+    if (i.message) i.message.edit(panelMesaji()).catch(() => {});
+    const embed = new EmbedBuilder().setColor(0xe74c3c).setTitle('🔨 Kullanıcı Yasaklandı')
+      .addFields(
+        { name: 'Kullanıcı', value: `${user?.tag || 'Bilinmiyor'} (${hedefId})` },
+        { name: 'Yetkili', value: `<@${i.user.id}>`, inline: true },
+        { name: 'Kalan Hak', value: `${h.kalan}/${BAN_LIMIT}`, inline: true },
+        { name: 'Sebep', value: sebep },
+      ).setTimestamp();
+    await i.channel.send({ embeds: [embed] }).catch(() => {});
+    return i.editReply(`✅ <@${hedefId}> yasaklandı. Kalan ban hakkı: **${h.kalan}/${BAN_LIMIT}**`);
+  }
+
+  // Yasak kaldır: banlı listesi
+  if (i.isButton() && i.customId === 'unban_liste') {
+    await i.deferReply({ flags: MessageFlags.Ephemeral });
+    const bans = await i.guild.bans.fetch({ limit: 25 });
+    if (!bans.size) return i.editReply('ℹ️ Banlı kullanıcı yok.');
+    const menu = new StringSelectMenuBuilder().setCustomId('unban_sec').setPlaceholder('Yasağı kaldırılacak kişiyi seç...')
+      .addOptions([...bans.values()].slice(0, 25).map((b) => ({
+        label: (b.user.username || b.user.id).slice(0, 100),
+        value: b.user.id,
+        description: (b.reason || 'Sebep yok').slice(0, 100),
+      })));
+    return i.editReply({ content: 'Yasağını kaldırmak istediğin kişiyi seç (son 25 ban):', components: [new ActionRowBuilder().addComponents(menu)] });
+  }
+
+  if (i.isStringSelectMenu() && i.customId === 'unban_sec') {
+    const id = i.values[0];
+    await i.guild.bans.remove(id, `${i.user.tag} (panel)`).catch(() => { throw new Error('Bu kişi artık banlı değil.'); });
+    i.channel.send({ embeds: [new EmbedBuilder().setColor(0x2ecc71).setTitle('✅ Yasak Kaldırıldı').setDescription(`\`${id}\` kullanıcısının yasağı <@${i.user.id}> tarafından kaldırıldı.`).setTimestamp()] }).catch(() => {});
+    return i.update({ content: `✅ \`${id}\` yasağı kaldırıldı.`, components: [] });
+  }
+
+  // Yasak kaldır: ID ile
+  if (i.isButton() && i.customId === 'unban_id') {
+    const modal = new ModalBuilder().setCustomId('unban_modal').setTitle('ID ile Yasak Kaldır');
+    modal.addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder().setCustomId('id').setLabel('Kullanıcı ID').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(25),
+    ));
+    return i.showModal(modal);
+  }
+
+  if (i.isModalSubmit() && i.customId === 'unban_modal') {
+    const id = i.fields.getTextInputValue('id').trim();
+    if (!/^\d{17,20}$/.test(id)) return i.reply({ content: '❌ Geçersiz ID.', flags: MessageFlags.Ephemeral });
+    await i.guild.bans.remove(id, `${i.user.tag} (panel)`).catch(() => { throw new Error('Bu ID banlı değil.'); });
+    i.channel.send({ embeds: [new EmbedBuilder().setColor(0x2ecc71).setTitle('✅ Yasak Kaldırıldı').setDescription(`\`${id}\` kullanıcısının yasağı <@${i.user.id}> tarafından kaldırıldı.`).setTimestamp()] }).catch(() => {});
+    return i.reply({ content: `✅ \`${id}\` yasağı kaldırıldı.`, flags: MessageFlags.Ephemeral });
+  }
+}
+
 async function dmDuyuruGonder(i) {
   if (!i.memberPermissions.has(PermissionFlagsBits.Administrator)) return hata(i, 'Yetkin yok.');
   const baslik = i.fields.getTextInputValue('baslik');
