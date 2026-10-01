@@ -34,7 +34,10 @@ const GUILD_ID = process.env.GUILD_ID; // doluysa komutlar anında görünür
 const MESAI_KANAL_ID = process.env.MESAI_KANAL_ID || '1554566189391552554';
 const KURUCU_ID = process.env.KURUCU_ID || null; // sunucu sahibi dışında panel açabilecek ekstra kişi (opsiyonel)
 const BAN_LIMIT = 5; // 1 saatte en fazla banlanacak kişi sayısı
-const logoDosya = () => new AttachmentBuilder(path.join(__dirname, 'logo.png'), { name: 'logo.png' });
+// logo.png yoksa bot çökmesin, logosuz çalışsın
+const LOGO_YOLU = path.join(__dirname, 'logo.png');
+const LOGO_VAR = fs.existsSync(LOGO_YOLU);
+const logoDosyalari = () => (LOGO_VAR ? [new AttachmentBuilder(LOGO_YOLU, { name: 'logo.png' })] : []);
 const SES_KANAL_ID = process.env.SES_KANAL_ID || '1542872463870922814';
 
 if (!TOKEN) {
@@ -251,14 +254,14 @@ client.on('interactionCreate', async (i) => {
           )
           .setFooter({ text: `${BOT_ADI} Moderation` })
           .setTimestamp();
-        embed.setThumbnail('attachment://logo.png');
-        return i.reply({ embeds: [embed], files: [logoDosya()] });
+        if (LOGO_VAR) embed.setThumbnail('attachment://logo.png');
+        return i.reply({ embeds: [embed], files: logoDosyalari() });
       }
 
       case 'ban': {
         const kurucu = i.user.id === i.guild.ownerId || (KURUCU_ID && i.user.id === KURUCU_ID);
         if (!kurucu) return hata(i, 'Bu paneli sadece sunucu kurucusu açabilir.');
-        return i.reply({ ...panelMesaji(), files: [logoDosya()] });
+        return i.reply({ ...panelMesaji(), files: logoDosyalari() });
       }
 
       case 'ban-sorgu': {
@@ -416,9 +419,9 @@ function panelMesaji() {
       { name: '⏳ Saatlik Limit', value: `**${h.kalan}/${BAN_LIMIT}** ban hakkı kaldı`, inline: true },
       { name: '📜 Kural', value: `1 saatte en fazla **${BAN_LIMIT}** kişi banlanabilir.`, inline: true },
     )
-    .setThumbnail('attachment://logo.png')
     .setFooter({ text: 'Fest Gun Moderation' })
     .setTimestamp();
+  if (LOGO_VAR) embed.setThumbnail('attachment://logo.png');
   const satir1 = new ActionRowBuilder().addComponents(
     new UserSelectMenuBuilder().setCustomId('ban_user').setPlaceholder('🎯 Banlanacak kişiyi seç...').setMinValues(1).setMaxValues(1),
   );
