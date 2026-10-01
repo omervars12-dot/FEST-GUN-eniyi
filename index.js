@@ -170,6 +170,7 @@ async function hazir() {
     console.error('❌ Komut kayıt hatası:', e.code, e.message, JSON.stringify(e.rawError?.errors || {}));
   }
 
+  banLogTest();
   sesKanalinaGir();
   haftalikKontrol();
   setInterval(haftalikKontrol, 60 * 1000);
@@ -405,9 +406,22 @@ const panelBanlari = new Set(); // panelden atılan banlar (çift log olmasın)
 async function banLogGonder(embed) {
   try {
     const ch = await client.channels.fetch(BAN_LOG_KANAL_ID);
-    if (ch?.isTextBased()) await ch.send({ embeds: [embed] });
-    else console.error('Ban log kanalı bulunamadı:', BAN_LOG_KANAL_ID);
-  } catch (e) { console.error('Ban log gönderilemedi:', e.message); }
+    if (!ch || !ch.isTextBased()) return { ok: false, hata: 'Kanal bulunamadı ya da yazı kanalı değil' };
+    await ch.send({ embeds: [embed] });
+    return { ok: true };
+  } catch (e) {
+    const sebep = e.code === 10003 ? 'Kanal bulunamadı (ID yanlış ya da bot kanalı göremiyor)'
+      : e.code === 50001 ? 'Botun bu kanalı görme yetkisi yok'
+      : e.code === 50013 ? 'Botun bu kanala mesaj / embed gönderme yetkisi yok'
+      : e.message;
+    console.error('❌ Ban log gönderilemedi:', e.code, e.message);
+    return { ok: false, hata: sebep };
+  }
+}
+
+async function banLogTest() {
+  const r = await banLogGonder(new EmbedBuilder().setColor(0x2ecc71).setDescription('✅ Ban log sistemi aktif. Banlar bu kanala yazılacak.'));
+  console.log(r.ok ? '✅ Ban log kanalına test mesajı gönderildi.' : `❌ Ban log kanalına yazılamıyor: ${r.hata}`);
 }
 
 // Panel dışında (sağ tık, başka bot vs.) atılan banları da logla
@@ -515,8 +529,8 @@ async function bilesenIslem(i) {
         { name: 'Sebep', value: sebep },
       ).setTimestamp();
     await i.channel.send({ embeds: [embed] }).catch(() => {});
-    banLogGonder(EmbedBuilder.from(embed).addFields({ name: 'Kaynak', value: 'Ban Paneli', inline: true }));
-    return await i.editReply(`✅ <@${hedefId}> yasaklandı. Kalan ban hakkı: **${h.kalan}/${BAN_LIMIT}**`);
+    const lg = await banLogGonder(EmbedBuilder.from(embed).addFields({ name: 'Kaynak', value: 'Ban Paneli', inline: true }));
+    return await i.editReply(`✅ <@${hedefId}> yasaklandı. Kalan ban hakkı: **${h.kalan}/${BAN_LIMIT}**${lg.ok ? '' : `\n⚠️ Log kanalına yazılamadı: ${lg.hata}`}`);
   }
 
   // Yasak kaldır: banlı listesi
@@ -579,5 +593,5 @@ async function dmDuyuruGonder(i) {
 }
 
 process.on('unhandledRejection', (e) => console.error('Yakalanmamış hata:', e));
-console.log('SÜRÜM: ban-panel-v4');
+console.log('SÜRÜM: ban-panel-v5');
 client.login(TOKEN);
