@@ -34,7 +34,10 @@ const GUILD_ID = process.env.GUILD_ID; // doluysa komutlar anında görünür
 const MESAI_KANAL_ID = process.env.MESAI_KANAL_ID || '1554566189391552554';
 const KURUCU_ID = process.env.KURUCU_ID || null; // sunucu sahibi dışında panel açabilecek ekstra kişi (opsiyonel)
 const BAN_LOG_KANAL_ID = process.env.BAN_LOG_KANAL_ID || '1542872504291561634';
-const BAN_LIMIT = 5; // 1 saatte en fazla banlanacak kişi sayısı
+const BAN_LIMIT = 5; // en fazla biriken ban hakkı (her saat 1 hak yenilenir)
+const KOMUT_ROL_ID = process.env.KOMUT_ROL_ID || '1542872257276149860'; // botu sadece bu rol kullanabilir
+const UYARI_KORUMALI_ROL_ID = process.env.UYARI_KORUMALI_ROL_ID || '1542925356984565962'; // bu role uyarı verilemez
+const UYARI_MAX = 5; // 5. uyarıda ban
 // logo.png yoksa bot çökmesin, logosuz çalışsın
 const LOGO_YOLU = path.join(__dirname, 'logo.png');
 const LOGO_VAR = fs.existsSync(LOGO_YOLU);
@@ -141,6 +144,10 @@ const commands = [
     .addSubcommand((s) => s.setName('tablo').setDescription('Haftalık mesai tablosu'))
     .addSubcommand((s) => s.setName('sıralama').setDescription('Bugünün en aktif kişileri')),
 
+  new SlashCommandBuilder().setName('yetkili').setDescription('Yetkili işlemleri')
+    .addSubcommandGroup((g) => g.setName('uyarı').setDescription('Yetkili uyarı sistemi')
+      .addSubcommand((s) => s.setName('paneli').setDescription('Yetkili uyarı panelini aç'))),
+
   new SlashCommandBuilder().setName('dmduyuru').setDescription('Sunucudaki herkese DM duyurusu gönder')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 ].map((c) => c.toJSON());
@@ -229,6 +236,12 @@ async function haftalikKontrol() {
 /* ------------------------- Etkileşimler ------------------------- */
 client.on('interactionCreate', async (i) => {
   try {
+    // Botu sadece belirlenen rol (ve sunucu sahibi) kullanabilir
+    if (!i.guild) return;
+    const izinli = i.user.id === i.guild.ownerId || (KURUCU_ID && i.user.id === KURUCU_ID) || i.member?.roles?.cache?.has(KOMUT_ROL_ID);
+    if (!izinli) {
+      return await i.reply({ content: `⛔ Bu botu kullanmak için <@&${KOMUT_ROL_ID}> rolüne sahip olmalısın.`, flags: MessageFlags.Ephemeral });
+    }
     if (!i.isChatInputCommand()) return await bilesenIslem(i);
 
     const sub = i.options.getSubcommand(false);
@@ -382,6 +395,13 @@ client.on('interactionCreate', async (i) => {
         break;
       }
 
+      case 'yetkili': {
+        if (i.options.getSubcommandGroup(false) === 'uyarı' && sub === 'paneli') {
+          return await i.reply(uyariPanelMesaji());
+        }
+        break;
+      }
+
       case 'dmduyuru': {
         const modal = new ModalBuilder().setCustomId('dmduyuru_modal').setTitle('DM Duyurusu');
         modal.addComponents(
@@ -448,12 +468,22 @@ client.on('guildBanAdd', async (ban) => {
 const SAAT = 3600e3;
 function banHakki() {
   const now = Date.now();
-  data.banLog = (data.banLog || []).filter((x) => now - x.t < SAAT);
-  return {
-    kullanilan: data.banLog.length,
-    kalan: Math.max(0, BAN_LIMIT - data.banLog.length),
-    acilis: data.banLog[0] ? data.banLog[0].t + SAAT : null,
-  };
+  let b = data.banHak;
+  if (!b) b = data.banHak = { hak: BAN_LIMIT, son: now };
+  if (b.hak >= BAN_LIMIT) { b.hak = BAN_LIMIT; b.son = now; }
+  else {
+    const n = Math.floor((now - b.son) / SAAT);
+    if (n > 0) {
+      b.hak = Math.min(BAN_LIMIT, b.hak + n);
+      b.son = b.hak >= BAN_LIMIT ? now : b.son + n * SAAT;
+    }
+  }
+  return { kalan: b.hak, acilis: b.hak < BAN_LIMIT ? b.son + SAAT : null };
+}
+function banHakKullan() {
+  banHakki();
+  data.banHak.hak = Math.max(0, data.banHak.hak - 1);
+  save();
 }
 
 function panelMesaji() {
@@ -463,8 +493,8 @@ function panelMesaji() {
     .setTitle('🔨 Fest Gun — Ban Paneli')
     .setDescription('Aşağıdaki menüden bir kişi seç, sebebini yaz ve yasakla.\nYasağı kaldırmak için **Yasak Kaldır** butonunu kullan.')
     .addFields(
-      { name: '⏳ Saatlik Limit', value: `**${h.kalan}/${BAN_LIMIT}** ban hakkı kaldı`, inline: true },
-      { name: '📜 Kural', value: `1 saatte en fazla **${BAN_LIMIT}** kişi banlanabilir.`, inline: true },
+      { name: '⏳ Ban Hakkı', value: `**${h.kalan}/${BAN_LIMIT}**${h.acilis ? `\nSıradaki hak <t:${Math.floor(h.acilis / 1000)}:R>` : ''}`, inline: true },
+      { name: '📜 Kural', value: `Her saat **1** ban hakkı yenilenir (en fazla ${BAN_LIMIT}).`, inline: true },
     )
     .setFooter({ text: 'Fest Gun Moderation' })
     .setTimestamp();
@@ -481,7 +511,7 @@ function panelMesaji() {
 
 async function banKontrol(i, hedefId) {
   const h = banHakki();
-  if (h.kalan <= 0) return `Saatlik ban limiti doldu (${BAN_LIMIT}/${BAN_LIMIT}). Yeni hak <t:${Math.floor(h.acilis / 1000)}:R> açılacak.`;
+  if (h.kalan <= 0) return `Ban hakkın kalmadı (0/${BAN_LIMIT}). Yeni hak <t:${Math.floor(h.acilis / 1000)}:R> yenilenecek.`;
   if (hedefId === i.user.id) return 'Kendini banlayamazsın.';
   if (hedefId === client.user.id) return 'Beni banlayamazsın.';
   if (hedefId === i.guild.ownerId || (KURUCU_ID && hedefId === KURUCU_ID)) return 'Kurucu banlanamaz.';
@@ -490,7 +520,110 @@ async function banKontrol(i, hedefId) {
   return null;
 }
 
+/* ------------------------- Yetkili Uyarı Paneli ------------------------- */
+function uyariPanelMesaji() {
+  const embed = new EmbedBuilder()
+    .setColor(0xf39c12)
+    .setTitle('⚠️ Yetkili Uyarı Paneli')
+    .setDescription('Aşağıdan bir yetkili seç, sebebini yaz ve uyarıyı ver.')
+    .addFields(
+      { name: '📈 Uyarı Basamakları', value: '`1x` → 1x Uyarı rolü\n`2x` → 2x Uyarı rolü\n`3x` → 3x Uyarı rolü\n`4x` → 4x Uyarı rolü\n`5x` → **Sunucudan BAN** 🔨' },
+      { name: '📜 Kurallar', value: 'Sadece **kendinden alt** roldeki kişilere uyarı verebilirsin.\nKorumalı role sahip kişilere uyarı verilemez.' },
+    )
+    .setFooter({ text: 'Fest Gun Moderation' })
+    .setTimestamp();
+  const satir = new ActionRowBuilder().addComponents(
+    new UserSelectMenuBuilder().setCustomId('uyari_user').setPlaceholder('⚠️ Uyarı verilecek yetkiliyi seç...').setMinValues(1).setMaxValues(1),
+  );
+  return { embeds: [embed], components: [satir] };
+}
+
+// 1x-4x uyarı rollerini bul, yoksa oluştur
+async function uyariRolleri(guild) {
+  const idler = (process.env.UYARI_ROLLERI || '').split(',').map((x) => x.trim()).filter(Boolean);
+  const renkler = [0xf1c40f, 0xe67e22, 0xd35400, 0xe74c3c];
+  const roller = [];
+  for (let n = 1; n <= UYARI_MAX - 1; n++) {
+    let r = idler[n - 1] ? guild.roles.cache.get(idler[n - 1]) : guild.roles.cache.find((x) => x.name === `${n}x Uyarı`);
+    if (!r) r = await guild.roles.create({ name: `${n}x Uyarı`, color: renkler[n - 1], reason: 'Yetkili uyarı sistemi' });
+    roller.push(r);
+  }
+  return roller;
+}
+
+async function uyariKontrol(i, hedefId) {
+  if (hedefId === i.user.id) return { red: 'Kendine uyarı veremezsin.' };
+  if (hedefId === client.user.id) return { red: 'Bana uyarı veremezsin.' };
+  if (hedefId === i.guild.ownerId || (KURUCU_ID && hedefId === KURUCU_ID)) return { red: 'Kurucuya uyarı verilemez.' };
+  const m = await i.guild.members.fetch(hedefId).catch(() => null);
+  if (!m) return { red: 'Bu kişi sunucuda değil.' };
+  if (m.user.bot) return { red: 'Botlara uyarı verilemez.' };
+  if (m.roles.cache.has(UYARI_KORUMALI_ROL_ID)) return { red: 'Bu role sahip kişilere uyarı verilemez.' };
+  const kurucuMu = i.user.id === i.guild.ownerId || (KURUCU_ID && i.user.id === KURUCU_ID);
+  if (!kurucuMu && i.member.roles.highest.position <= m.roles.highest.position) {
+    return { red: 'Sadece kendinden alt rütbedeki kişilere uyarı verebilirsin.' };
+  }
+  if (!m.manageable) return { red: 'Bu kişinin rollerini yönetemem (rolü benden üstte ya da yetkim yok).' };
+  return { m };
+}
+
 async function bilesenIslem(i) {
+  // Yetkili uyarı: kişi seçildi -> sebep formu
+  if (i.isUserSelectMenu() && i.customId === 'uyari_user') {
+    const hedefId = i.values[0];
+    const k = await uyariKontrol(i, hedefId);
+    if (k.red) return await i.reply({ content: `❌ ${k.red}`, flags: MessageFlags.Ephemeral });
+    const sayi = (data.uyarilar?.[hedefId]?.sayi || 0) + 1;
+    const modal = new ModalBuilder().setCustomId(`uyari_modal_${hedefId}`).setTitle(`Uyarı Sebebi (${sayi}/${UYARI_MAX})`);
+    modal.addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder().setCustomId('sebep').setLabel('Sebep').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(300),
+    ));
+    return await i.showModal(modal);
+  }
+
+  // Yetkili uyarı: form gönderildi
+  if (i.isModalSubmit() && i.customId.startsWith('uyari_modal_')) {
+    const hedefId = i.customId.slice('uyari_modal_'.length);
+    const sebep = i.fields.getTextInputValue('sebep');
+    const k = await uyariKontrol(i, hedefId);
+    if (k.red) return await i.reply({ content: `❌ ${k.red}`, flags: MessageFlags.Ephemeral });
+    await i.deferReply({ flags: MessageFlags.Ephemeral });
+
+    const m = k.m;
+    const kayit = ((data.uyarilar ||= {})[hedefId] ||= { sayi: 0, kayit: [] });
+    const yeniSayi = kayit.sayi + 1;
+    let sonuc;
+
+    if (yeniSayi >= UYARI_MAX) {
+      panelBanlari.add(hedefId); setTimeout(() => panelBanlari.delete(hedefId), 30000);
+      if (!m.bannable) return await i.editReply('❌ Bu kişiyi banlayamam (rolü benden üstte).');
+      await i.guild.members.ban(hedefId, { reason: `${UYARI_MAX}x yetkili uyarısı — son uyarı: ${i.user.tag}: ${sebep}` });
+      data.bans.push({ id: hedefId, tag: m.user.tag, yetkili: i.user.id, sebep: `${UYARI_MAX}x uyarı: ${sebep}`, t: Date.now() });
+      sonuc = `🔨 <@${hedefId}> **${UYARI_MAX}. uyarısını** aldı ve sunucudan **banlandı**.`;
+    } else {
+      const roller = await uyariRolleri(i.guild);
+      await m.roles.remove(roller.filter((r) => m.roles.cache.has(r.id)), 'Yetkili uyarı güncellendi').catch(() => {});
+      await m.roles.add(roller[yeniSayi - 1], `${yeniSayi}x uyarı — ${i.user.tag}`);
+      sonuc = `⚠️ <@${hedefId}> yetkilisine **${yeniSayi}x Uyarı** verildi. (${yeniSayi}/${UYARI_MAX})`;
+    }
+
+    kayit.sayi = yeniSayi;
+    kayit.kayit.push({ t: Date.now(), yetkili: i.user.id, sebep });
+    save();
+
+    const embed = new EmbedBuilder().setColor(yeniSayi >= UYARI_MAX ? 0xe74c3c : 0xf39c12)
+      .setTitle(yeniSayi >= UYARI_MAX ? '🔨 Yetkili 5. Uyarıda Banlandı' : `⚠️ Yetkili Uyarısı (${yeniSayi}/${UYARI_MAX})`)
+      .setThumbnail(m.user.displayAvatarURL())
+      .addFields(
+        { name: 'Yetkili', value: `<@${hedefId}> (${hedefId})` },
+        { name: 'Uyaran', value: `<@${i.user.id}>`, inline: true },
+        { name: 'Uyarı Sayısı', value: `${yeniSayi}/${UYARI_MAX}`, inline: true },
+        { name: 'Sebep', value: sebep },
+      ).setTimestamp();
+    const lg = await banLogGonder(embed);
+    return await i.editReply(`${sonuc}${lg.ok ? '' : `\n⚠️ Log kanalına yazılamadı: ${lg.hata}`}`);
+  }
+
   // DM duyuru formu
   if (i.isModalSubmit() && i.customId === 'dmduyuru_modal') return dmDuyuruGonder(i);
 
@@ -516,7 +649,7 @@ async function bilesenIslem(i) {
     const user = await client.users.fetch(hedefId).catch(() => null);
     panelBanlari.add(hedefId); setTimeout(() => panelBanlari.delete(hedefId), 30000);
     await i.guild.members.ban(hedefId, { reason: `${i.user.tag}: ${sebep}` });
-    (data.banLog ||= []).push({ t: Date.now(), id: hedefId, yetkili: i.user.id });
+    banHakKullan();
     data.bans.push({ id: hedefId, tag: user?.tag || hedefId, yetkili: i.user.id, sebep, t: Date.now() });
     save();
     const h = banHakki();
@@ -593,5 +726,5 @@ async function dmDuyuruGonder(i) {
 }
 
 process.on('unhandledRejection', (e) => console.error('Yakalanmamış hata:', e));
-console.log('SÜRÜM: ban-panel-v5');
+console.log('SÜRÜM: ban-panel-v6');
 client.login(TOKEN);
