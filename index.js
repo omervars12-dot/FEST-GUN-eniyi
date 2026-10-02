@@ -34,6 +34,7 @@ const GUILD_ID = process.env.GUILD_ID; // doluysa komutlar anında görünür
 const MESAI_KANAL_ID = process.env.MESAI_KANAL_ID || '1554566189391552554';
 const KURUCU_ID = process.env.KURUCU_ID || null; // sunucu sahibi dışında panel açabilecek ekstra kişi (opsiyonel)
 const BAN_LOG_KANAL_ID = process.env.BAN_LOG_KANAL_ID || '1542872504291561634';
+const UYARI_LOG_KANAL_ID = process.env.UYARI_LOG_KANAL_ID || '1542872591042216096'; // yetkili uyarı logları
 const BAN_LIMIT = 5; // en fazla biriken ban hakkı (her saat 1 hak yenilenir)
 const KOMUT_ROL_ID = process.env.KOMUT_ROL_ID || '1542872257276149860'; // botu sadece bu rol kullanabilir
 const UYARI_KORUMALI_ROL_ID = process.env.UYARI_KORUMALI_ROL_ID || '1542925356984565962'; // bu role uyarı verilemez
@@ -423,9 +424,9 @@ client.on('interactionCreate', async (i) => {
 /* ------------------------- Ban Logu ------------------------- */
 const panelBanlari = new Set(); // panelden atılan banlar (çift log olmasın)
 
-async function banLogGonder(embed) {
+async function banLogGonder(embed, kanalId = BAN_LOG_KANAL_ID) {
   try {
-    const ch = await client.channels.fetch(BAN_LOG_KANAL_ID);
+    const ch = await client.channels.fetch(kanalId);
     if (!ch || !ch.isTextBased()) return { ok: false, hata: 'Kanal bulunamadı ya da yazı kanalı değil' };
     await ch.send({ embeds: [embed] });
     return { ok: true };
@@ -442,6 +443,8 @@ async function banLogGonder(embed) {
 async function banLogTest() {
   const r = await banLogGonder(new EmbedBuilder().setColor(0x2ecc71).setDescription('✅ Ban log sistemi aktif. Banlar bu kanala yazılacak.'));
   console.log(r.ok ? '✅ Ban log kanalına test mesajı gönderildi.' : `❌ Ban log kanalına yazılamıyor: ${r.hata}`);
+  const u = await banLogGonder(new EmbedBuilder().setColor(0xf39c12).setDescription('✅ Yetkili uyarı log sistemi aktif. Uyarılar bu kanala yazılacak.'), UYARI_LOG_KANAL_ID);
+  console.log(u.ok ? '✅ Uyarı log kanalına test mesajı gönderildi.' : `❌ Uyarı log kanalına yazılamıyor: ${u.hata}`);
 }
 
 // Panel dışında (sağ tık, başka bot vs.) atılan banları da logla
@@ -620,7 +623,8 @@ async function bilesenIslem(i) {
         { name: 'Uyarı Sayısı', value: `${yeniSayi}/${UYARI_MAX}`, inline: true },
         { name: 'Sebep', value: sebep },
       ).setTimestamp();
-    const lg = await banLogGonder(embed);
+    const lg = await banLogGonder(embed, UYARI_LOG_KANAL_ID);
+    if (yeniSayi >= UYARI_MAX) banLogGonder(EmbedBuilder.from(embed).addFields({ name: 'Kaynak', value: 'Yetkili Uyarı Sistemi', inline: true }));
     return await i.editReply(`${sonuc}${lg.ok ? '' : `\n⚠️ Log kanalına yazılamadı: ${lg.hata}`}`);
   }
 
@@ -726,5 +730,5 @@ async function dmDuyuruGonder(i) {
 }
 
 process.on('unhandledRejection', (e) => console.error('Yakalanmamış hata:', e));
-console.log('SÜRÜM: ban-panel-v6');
+console.log('SÜRÜM: ban-panel-v7');
 client.login(TOKEN);
