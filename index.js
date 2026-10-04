@@ -37,6 +37,7 @@ const BAN_LOG_KANAL_ID = process.env.BAN_LOG_KANAL_ID || '1542872504291561634';
 const UYARI_LOG_KANAL_ID = process.env.UYARI_LOG_KANAL_ID || '1542872591042216096'; // yetkili uyarı logları
 const BAN_LIMIT = 5; // en fazla biriken ban hakkı (her saat 1 hak yenilenir)
 const KOMUT_ROL_ID = process.env.KOMUT_ROL_ID || '1542872257276149860'; // botu sadece bu rol kullanabilir
+const UYE_ROL_ID = process.env.UYE_ROL_ID || '1542925356984565962'; // /member ile verilecek rol
 // Bu rollere sahip kişilere uyarı verilemez. Birden fazla ise virgülle ayır. Kapatmak için Railway'de UYARI_KORUMALI_ROL_ID=yok yaz.
 const KORUMALI_ROLLER = (process.env.UYARI_KORUMALI_ROL_ID || '1542925356984565962').split(',').map((x) => x.trim()).filter((x) => x && x.toLowerCase() !== 'yok');
 const SUPER_UYARI_ROL_ID = process.env.SUPER_UYARI_ROL_ID || '1542874337546338386'; // bu rol herkese uyarı verebilir (rütbe ve korumalı rol sınırı yok)
@@ -152,6 +153,10 @@ const commands = [
   new SlashCommandBuilder().setName('yetkili').setDescription('Yetkili işlemleri')
     .addSubcommandGroup((g) => g.setName('uyarı').setDescription('Yetkili uyarı sistemi')
       .addSubcommand((s) => s.setName('paneli').setDescription('Yetkili uyarı panelini aç'))),
+
+  new SlashCommandBuilder().setName('member').setDescription('Hiçbir rolü olmayan kişiye üye rolü ver (sadece kurucu)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addUserOption((o) => o.setName('kullanıcı').setDescription('Rol verilecek kişi').setRequired(true)),
 
   new SlashCommandBuilder().setName('dmduyuru').setDescription('Sunucudaki herkese DM duyurusu gönder')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
@@ -342,6 +347,30 @@ client.on('interactionCreate', async (i) => {
         if (i.commandName === 'rolver') await m.roles.add(rol); else await m.roles.remove(rol);
         return await i.reply({ embeds: [new EmbedBuilder().setColor(rol.color || 0x5865f2)
           .setDescription(`${i.commandName === 'rolver' ? '✅' : '➖'} <@${user.id}> kullanıcısına ${rol} rolü ${i.commandName === 'rolver' ? 'verildi' : 'alındı'}.`)] });
+      }
+
+      case 'member': {
+        const kurucu = i.user.id === i.guild.ownerId || (KURUCU_ID && i.user.id === KURUCU_ID);
+        if (!kurucu) return await hata(i, 'Bu komutu sadece sunucu kurucusu kullanabilir.');
+
+        const user = i.options.getUser('kullanıcı');
+        const m = await i.guild.members.fetch(user.id).catch(() => null);
+        if (!m) return await hata(i, 'Kullanıcı sunucuda değil.');
+        if (m.user.bot) return await hata(i, 'Botlara bu rol verilemez.');
+
+        // roles.cache içinde @everyone her zaman vardır, yani size 1 = hiç rolü yok
+        if (m.roles.cache.size > 1) return await hata(i, 'Bu kişinin zaten rolü var. Bu komut sadece hiçbir rolü olmayanlara kullanılabilir.');
+
+        const rol = await i.guild.roles.fetch(UYE_ROL_ID).catch(() => null);
+        if (!rol) return await hata(i, `Rol bulunamadı (${UYE_ROL_ID}).`);
+        if (rol.managed || rol.position >= i.guild.members.me.roles.highest.position) {
+          return await hata(i, 'Bu rolü veremem (botun rolü bu rolden düşük ya da rol bir bot/entegrasyon rolü).');
+        }
+
+        await m.roles.add(rol, `/member — ${i.user.tag}`);
+        return await i.reply({ embeds: [new EmbedBuilder().setColor(0x2ecc71).setTitle('✅ Üye Rolü Verildi')
+          .setDescription(`<@${user.id}> kullanıcısına ${rol} rolü verildi.`)
+          .addFields({ name: 'Yetkili', value: `<@${i.user.id}>`, inline: true }).setTimestamp()] });
       }
 
       case 'istatistik-bilgi': {
@@ -757,5 +786,5 @@ async function dmDuyuruGonder(i) {
 }
 
 process.on('unhandledRejection', (e) => console.error('Yakalanmamış hata:', e));
-console.log('SÜRÜM: ban-panel-v9');
+console.log('SÜRÜM: ban-panel-v10');
 client.login(TOKEN);
