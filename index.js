@@ -154,9 +154,8 @@ const commands = [
     .addSubcommandGroup((g) => g.setName('uyarı').setDescription('Yetkili uyarı sistemi')
       .addSubcommand((s) => s.setName('paneli').setDescription('Yetkili uyarı panelini aç'))),
 
-  new SlashCommandBuilder().setName('member').setDescription('Hiçbir rolü olmayan kişiye üye rolü ver (sadece kurucu)')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addUserOption((o) => o.setName('kullanıcı').setDescription('Rol verilecek kişi').setRequired(true)),
+  new SlashCommandBuilder().setName('member').setDescription('Hiçbir rolü olmayan herkese otomatik üye rolü ver (sadece kurucu)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder().setName('dmduyuru').setDescription('Sunucudaki herkese DM duyurusu gönder')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
@@ -353,23 +352,28 @@ client.on('interactionCreate', async (i) => {
         const kurucu = i.user.id === i.guild.ownerId || (KURUCU_ID && i.user.id === KURUCU_ID);
         if (!kurucu) return await hata(i, 'Bu komutu sadece sunucu kurucusu kullanabilir.');
 
-        const user = i.options.getUser('kullanıcı');
-        const m = await i.guild.members.fetch(user.id).catch(() => null);
-        if (!m) return await hata(i, 'Kullanıcı sunucuda değil.');
-        if (m.user.bot) return await hata(i, 'Botlara bu rol verilemez.');
-
-        // roles.cache içinde @everyone her zaman vardır, yani size 1 = hiç rolü yok
-        if (m.roles.cache.size > 1) return await hata(i, 'Bu kişinin zaten rolü var. Bu komut sadece hiçbir rolü olmayanlara kullanılabilir.');
-
         const rol = await i.guild.roles.fetch(UYE_ROL_ID).catch(() => null);
         if (!rol) return await hata(i, `Rol bulunamadı (${UYE_ROL_ID}).`);
         if (rol.managed || rol.position >= i.guild.members.me.roles.highest.position) {
           return await hata(i, 'Bu rolü veremem (botun rolü bu rolden düşük ya da rol bir bot/entegrasyon rolü).');
         }
 
-        await m.roles.add(rol, `/member — ${i.user.tag}`);
-        return await i.reply({ embeds: [new EmbedBuilder().setColor(0x2ecc71).setTitle('✅ Üye Rolü Verildi')
-          .setDescription(`<@${user.id}> kullanıcısına ${rol} rolü verildi.`)
+        await i.deferReply();
+        const tum = await i.guild.members.fetch();
+        // roles.cache içinde @everyone her zaman vardır, yani size 1 = hiç rolü yok
+        const hedefler = [...tum.values()].filter((x) => !x.user.bot && x.roles.cache.size <= 1);
+        if (!hedefler.length) return await i.editReply('ℹ️ Hiçbir rolü olmayan kimse yok.');
+
+        let ok = 0, fail = 0, n = 0;
+        for (const x of hedefler) {
+          try { await x.roles.add(rol, `/member — ${i.user.tag}`); ok++; } catch { fail++; }
+          n++;
+          if (n % 20 === 0) await i.editReply(`⏳ Roller veriliyor... ${n}/${hedefler.length}`).catch(() => {});
+          await new Promise((r) => setTimeout(r, 400)); // rate limit koruması
+        }
+
+        return await i.editReply({ content: '', embeds: [new EmbedBuilder().setColor(0x2ecc71).setTitle('✅ Üye Rolleri Verildi')
+          .setDescription(`Hiçbir rolü olmayan **${hedefler.length}** kişiden **${ok}** kişiye ${rol} rolü verildi.${fail ? `\n❌ Başarısız: **${fail}**` : ''}`)
           .addFields({ name: 'Yetkili', value: `<@${i.user.id}>`, inline: true }).setTimestamp()] });
       }
 
