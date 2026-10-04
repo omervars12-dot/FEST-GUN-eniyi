@@ -37,7 +37,11 @@ const BAN_LOG_KANAL_ID = process.env.BAN_LOG_KANAL_ID || '1542872504291561634';
 const UYARI_LOG_KANAL_ID = process.env.UYARI_LOG_KANAL_ID || '1542872591042216096'; // yetkili uyarı logları
 const BAN_LIMIT = 5; // en fazla biriken ban hakkı (her saat 1 hak yenilenir)
 const KOMUT_ROL_ID = process.env.KOMUT_ROL_ID || '1542872257276149860'; // botu sadece bu rol kullanabilir
-const UYARI_KORUMALI_ROL_ID = process.env.UYARI_KORUMALI_ROL_ID || '1542925356984565962'; // bu role uyarı verilemez
+// Bu rollere sahip kişilere uyarı verilemez. Birden fazla ise virgülle ayır. Kapatmak için Railway'de UYARI_KORUMALI_ROL_ID=yok yaz.
+const KORUMALI_ROLLER = (process.env.UYARI_KORUMALI_ROL_ID || '1542925356984565962').split(',').map((x) => x.trim()).filter((x) => x && x.toLowerCase() !== 'yok');
+const SUPER_UYARI_ROL_ID = process.env.SUPER_UYARI_ROL_ID || '1542874337546338386'; // bu rol herkese uyarı verebilir (rütbe ve korumalı rol sınırı yok)
+const superUyarici = (member) => !!member?.roles?.cache?.has(SUPER_UYARI_ROL_ID);
+const uyariIslemi = (i) => (i.isChatInputCommand() && i.commandName === 'yetkili') || (!i.isChatInputCommand() && typeof i.customId === 'string' && i.customId.startsWith('uyari_'));
 const UYARI_MAX = 5; // 5. uyarıda ban
 // logo.png yoksa bot çökmesin, logosuz çalışsın
 const LOGO_YOLU = path.join(__dirname, 'logo.png');
@@ -154,6 +158,26 @@ const commands = [
 ].map((c) => c.toJSON());
 
 /* ------------------------- Hazır ------------------------- */
+async function korumaKontrol() {
+  try {
+    for (const g of client.guilds.cache.values()) {
+      await g.members.fetch().catch(() => {});
+      const sr = g.roles.cache.get(SUPER_UYARI_ROL_ID);
+      if (sr) console.log(`⭐ Süper uyarı rolü: "${sr.name}" — ${sr.members.size} üye (herkese uyarı verebilir).`);
+      else console.warn(`⚠️ Süper uyarı rolü bulunamadı (${SUPER_UYARI_ROL_ID}).`);
+      for (const id of KORUMALI_ROLLER) {
+        const r = g.roles.cache.get(id);
+        if (id === g.id) console.warn(`⚠️ Korumalı rol ID'si @everyone (sunucu ID'si) — herkes korunmuş olur! UYARI_KORUMALI_ROL_ID'yi düzelt.`);
+        else if (!r) console.warn(`⚠️ Korumalı rol bulunamadı (${id}). Bu sunucuda böyle bir rol yok, koruma çalışmaz.`);
+        else {
+          console.log(`🛡️ Uyarı korumalı rol: "${r.name}" — ${r.members.size}/${g.memberCount} üyede var.`);
+          if (r.members.size > g.memberCount * 0.4) console.warn(`⚠️ "${r.name}" rolü üyelerin büyük kısmında var. Uyarı verilecek yetkililer de bu role sahipse hiçbirine uyarı verilemez!`);
+        }
+      }
+    }
+  } catch (e) { console.error('Koruma kontrolü hatası:', e.message); }
+}
+
 let hazirMi = false;
 async function hazir() {
   if (hazirMi) return;
@@ -178,6 +202,7 @@ async function hazir() {
     console.error('❌ Komut kayıt hatası:', e.code, e.message, JSON.stringify(e.rawError?.errors || {}));
   }
 
+  korumaKontrol();
   banLogTest();
   sesKanalinaGir();
   haftalikKontrol();
@@ -239,7 +264,7 @@ client.on('interactionCreate', async (i) => {
   try {
     // Botu sadece belirlenen rol (ve sunucu sahibi) kullanabilir
     if (!i.guild) return;
-    const izinli = i.user.id === i.guild.ownerId || (KURUCU_ID && i.user.id === KURUCU_ID) || i.member?.roles?.cache?.has(KOMUT_ROL_ID);
+    const izinli = i.user.id === i.guild.ownerId || (KURUCU_ID && i.user.id === KURUCU_ID) || i.member?.roles?.cache?.has(KOMUT_ROL_ID) || (superUyarici(i.member) && uyariIslemi(i));
     if (!izinli) {
       return await i.reply({ content: `⛔ Bu botu kullanmak için <@&${KOMUT_ROL_ID}> rolüne sahip olmalısın.`, flags: MessageFlags.Ephemeral });
     }
@@ -531,7 +556,7 @@ function uyariPanelMesaji() {
     .setDescription('Aşağıdan bir yetkili seç, sebebini yaz ve uyarıyı ver.')
     .addFields(
       { name: '📈 Uyarı Basamakları', value: '`1x` → 1x Uyarı rolü\n`2x` → 2x Uyarı rolü\n`3x` → 3x Uyarı rolü\n`4x` → 4x Uyarı rolü\n`5x` → **Sunucudan BAN** 🔨' },
-      { name: '📜 Kurallar', value: 'Sadece **kendinden alt** roldeki kişilere uyarı verebilirsin.\nKorumalı role sahip kişilere uyarı verilemez.' },
+      { name: '📜 Kurallar', value: `Sadece **kendinden alt** roldeki kişilere uyarı verebilirsin.\nKorumalı role sahip kişilere uyarı verilemez.\n<@&${SUPER_UYARI_ROL_ID}> rolü bu sınırlardan muaftır, herkese uyarı verebilir.` },
     )
     .setFooter({ text: 'Fest Gun Moderation' })
     .setTimestamp();
@@ -561,9 +586,11 @@ async function uyariKontrol(i, hedefId) {
   const m = await i.guild.members.fetch(hedefId).catch(() => null);
   if (!m) return { red: 'Bu kişi sunucuda değil.' };
   if (m.user.bot) return { red: 'Botlara uyarı verilemez.' };
-  if (m.roles.cache.has(UYARI_KORUMALI_ROL_ID)) return { red: 'Bu role sahip kişilere uyarı verilemez.' };
+  const superMi = superUyarici(i.member);
+  const korumaRol = superMi ? null : KORUMALI_ROLLER.find((id) => id !== i.guild.id && m.roles.cache.has(id));
+  if (korumaRol) return { red: `${m} kişisinde <@&${korumaRol}> rolü var. Bu role sahip kişilere uyarı verilemez.` };
   const kurucuMu = i.user.id === i.guild.ownerId || (KURUCU_ID && i.user.id === KURUCU_ID);
-  if (!kurucuMu && i.member.roles.highest.position <= m.roles.highest.position) {
+  if (!kurucuMu && !superMi && i.member.roles.highest.position <= m.roles.highest.position) {
     return { red: 'Sadece kendinden alt rütbedeki kişilere uyarı verebilirsin.' };
   }
   if (!m.manageable) return { red: 'Bu kişinin rollerini yönetemem (rolü benden üstte ya da yetkim yok).' };
@@ -730,5 +757,5 @@ async function dmDuyuruGonder(i) {
 }
 
 process.on('unhandledRejection', (e) => console.error('Yakalanmamış hata:', e));
-console.log('SÜRÜM: ban-panel-v7');
+console.log('SÜRÜM: ban-panel-v9');
 client.login(TOKEN);
