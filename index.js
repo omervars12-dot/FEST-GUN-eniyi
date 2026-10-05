@@ -10,7 +10,7 @@ const {
   Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, PermissionFlagsBits,
   MessageFlags, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder,
   ChannelType, ActivityType, ButtonBuilder, ButtonStyle, AttachmentBuilder,
-  UserSelectMenuBuilder, StringSelectMenuBuilder, AuditLogEvent,
+  UserSelectMenuBuilder, StringSelectMenuBuilder, RoleSelectMenuBuilder, AuditLogEvent,
 } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
@@ -50,6 +50,11 @@ const LOGO_YOLU = path.join(__dirname, 'logo.png');
 const LOGO_VAR = fs.existsSync(LOGO_YOLU);
 const logoDosyalari = () => (LOGO_VAR ? [new AttachmentBuilder(LOGO_YOLU, { name: 'logo.png' })] : []);
 const SES_KANAL_ID = process.env.SES_KANAL_ID || '1542872463870922814';
+const IC_YETKILI_ROL_ID = process.env.IC_YETKILI_ROL_ID || '1542872160979128362'; // /ic yetkili-çağır ile etiketlenecek ve DM atılacak rol
+const IC_BEKLEME_MS = 2 * 60 * 1000; // aynı kişi art arda yetkili çağıramasın (2 dk)
+const icBekleme = new Map();
+const GUNUN_YETKILISI_KANAL_ID = process.env.GUNUN_YETKILISI_KANAL_ID || '1554566189391552554'; // günün yetkilisi buraya atılır
+const YETKI_ALT_SAYISI = 2; // yetki verirken, KİŞİNİN kendi en üst rolünden en fazla kaç rütbe aşağıdaki roller verilebilir
 
 if (!TOKEN) {
   console.error('DISCORD_TOKEN ortam değişkeni tanımlı değil!');
@@ -160,6 +165,12 @@ const commands = [
 
   new SlashCommandBuilder().setName('cekilis').setDescription('Çekiliş başlat (@everyone atar)'),
 
+  new SlashCommandBuilder().setName('ic').setDescription('İç işlemler')
+    .addSubcommand((s) => s.setName('yetkili-çağır').setDescription('Yetkilileri çağır (yetkililere DM gider)')),
+
+  new SlashCommandBuilder().setName('yetki').setDescription('Yetki verme')
+    .addSubcommand((s) => s.setName('paneli').setDescription('Yetki verme panelini aç')),
+
   new SlashCommandBuilder().setName('dmduyuru').setDescription('Sunucudaki herkese DM duyurusu gönder')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 ].map((c) => c.toJSON());
@@ -219,6 +230,8 @@ async function hazir() {
   setInterval(haftalikKontrol, 60 * 1000);
   cekilisKontrol();
   setInterval(cekilisKontrol, 15 * 1000);
+  gunlukKontrol();
+  setInterval(gunlukKontrol, 60 * 1000);
 }
 client.once('clientReady', hazir);
 client.once('ready', hazir);
@@ -276,7 +289,7 @@ client.on('interactionCreate', async (i) => {
   try {
     // Botu sadece belirlenen rol (ve sunucu sahibi) kullanabilir
     if (!i.guild) return;
-    const izinli = i.user.id === i.guild.ownerId || (KURUCU_ID && i.user.id === KURUCU_ID) || i.member?.roles?.cache?.has(KOMUT_ROL_ID) || (superUyarici(i.member) && uyariIslemi(i)) || (i.isButton() && i.customId === 'cekilis_katil');
+    const izinli = i.user.id === i.guild.ownerId || (KURUCU_ID && i.user.id === KURUCU_ID) || i.member?.roles?.cache?.has(KOMUT_ROL_ID) || (superUyarici(i.member) && uyariIslemi(i)) || (i.isButton() && i.customId === 'cekilis_katil') || (i.isChatInputCommand() && i.commandName === 'ic');
     if (!izinli) {
       return await i.reply({ content: `⛔ Bu botu kullanmak için <@&${KOMUT_ROL_ID}> rolüne sahip olmalısın.`, flags: MessageFlags.Ephemeral });
     }
@@ -469,6 +482,40 @@ client.on('interactionCreate', async (i) => {
         break;
       }
 
+      case 'ic': {
+        if (sub !== 'yetkili-çağır') break;
+        const son = icBekleme.get(i.user.id) || 0;
+        const kalan = son + IC_BEKLEME_MS - Date.now();
+        if (kalan > 0) return await hata(i, `Az önce yetkili çağırdın. ${Math.ceil(kalan / 1000)} saniye sonra tekrar deneyebilirsin.`);
+        icBekleme.set(i.user.id, Date.now());
+
+        const embed = new EmbedBuilder().setColor(0xe67e22).setTitle('🔔 Yetkili Çağrısı')
+          .setDescription(`<@${i.user.id}> yetkili çağırıyor!\nYetkililer en kısa sürede ilgilenecek.`)
+          .addFields({ name: 'Çağıran', value: `<@${i.user.id}>`, inline: true }, { name: 'Kanal', value: `<#${i.channelId}>`, inline: true })
+          .setTimestamp();
+        await i.reply({ content: `<@&${IC_YETKILI_ROL_ID}>`, embeds: [embed], allowedMentions: { roles: [IC_YETKILI_ROL_ID] } });
+
+        // Role sahip herkesin DM'ine mesaj gönder
+        const rol = await i.guild.roles.fetch(IC_YETKILI_ROL_ID).catch(() => null);
+        if (!rol) return await i.followUp({ content: `⚠️ Yetkili rolü bulunamadı (${IC_YETKILI_ROL_ID}).`, flags: MessageFlags.Ephemeral });
+        await i.guild.members.fetch().catch(() => {});
+        const dm = new EmbedBuilder().setColor(0xe67e22).setTitle('👋 Bir kişi sizi dürttü!')
+          .setDescription(`Bir kişi sizi dürttü, yetkili çağırıyor.\n\n**Kişi:** <@${i.user.id}> (${i.user.tag})\n**Kanal:** <#${i.channelId}>\n[Kanala git](https://discord.com/channels/${i.guild.id}/${i.channelId})`)
+          .setFooter({ text: `${i.guild.name} • ${BOT_ADI}` }).setTimestamp();
+        let ok = 0, fail = 0;
+        for (const m of rol.members.values()) {
+          if (m.user.bot || m.id === i.user.id) continue;
+          try { await m.send({ embeds: [dm] }); ok++; } catch { fail++; }
+          await new Promise((r) => setTimeout(r, 300)); // rate limit koruması
+        }
+        return await i.followUp({ content: `📨 ${ok} yetkiliye DM gitti${fail ? `, ${fail} kişinin DM'i kapalı.` : '.'}`, flags: MessageFlags.Ephemeral });
+      }
+
+      case 'yetki': {
+        if (sub === 'paneli') return await i.reply(yetkiPanelMesaji());
+        break;
+      }
+
       case 'cekilis': {
         const modal = new ModalBuilder().setCustomId('cekilis_modal').setTitle('Çekiliş Oluştur');
         modal.addComponents(
@@ -649,7 +696,114 @@ async function uyariKontrol(i, hedefId) {
   return { m };
 }
 
+/* ------------------------- Yetki Verme Paneli ------------------------- */
+const kurucuKisi = (i) => i.user.id === i.guild.ownerId || (KURUCU_ID && i.user.id === KURUCU_ID);
+
+function yetkiPanelMesaji() {
+  const embed = new EmbedBuilder()
+    .setColor(0x9b59b6)
+    .setTitle('🎖️ Yetki Verme Paneli')
+    .setDescription('Aşağıdan bir kişi seç, ardından verilecek rolü seç.')
+    .addFields(
+      { name: '📜 Kurallar', value: `Sadece **kendi en üst rolünden ${YETKI_ALT_SAYISI} rütbe aşağıdaki** rolleri verebilirsin. Senin rütben baz alınır, botun rütbesi değil.\nKendine, kendinle aynı ya da senden üst rütbedeki kişilere rol veremezsin.\nKurucu tüm rolleri verebilir.` },
+    )
+    .setFooter({ text: 'Fest Gun Moderation' })
+    .setTimestamp();
+  const satir = new ActionRowBuilder().addComponents(
+    new UserSelectMenuBuilder().setCustomId('yetki_user').setPlaceholder('🎯 Rol verilecek kişiyi seç...').setMinValues(1).setMaxValues(1),
+  );
+  return { embeds: [embed], components: [satir] };
+}
+
+// Rol verilemiyorsa sebebini döndürür, verilebiliyorsa null
+function yetkiRolRed(i, rol) {
+  if (rol.id === i.guild.id) return 'Bu rol verilemez.';
+  if (rol.managed) return 'Bu rol bir bot/entegrasyon rolü, verilemez.';
+  if (rol.position >= i.guild.members.me.roles.highest.position) return 'Bu rolü veremem (botun rolü bu rolden düşük). Botun rolünü yukarı çekmen gerekir.';
+  if (kurucuKisi(i)) return null;
+  const ust = i.member.roles.highest;
+  if (rol.position >= ust.position || rol.position < ust.position - YETKI_ALT_SAYISI) {
+    return `Sadece kendi en üst rolünün (${ust.name}) ${YETKI_ALT_SAYISI} rütbe altına kadar olan rolleri verebilirsin.`;
+  }
+  return null;
+}
+
+async function yetkiKontrol(i, hedefId) {
+  if (hedefId === i.user.id) return { red: 'Kendine rol veremezsin.' };
+  if (hedefId === client.user.id) return { red: 'Bota rol verilemez.' };
+  const m = await i.guild.members.fetch(hedefId).catch(() => null);
+  if (!m) return { red: 'Bu kişi sunucuda değil.' };
+  if (m.user.bot) return { red: 'Botlara rol verilemez.' };
+  if (!kurucuKisi(i) && m.roles.highest.position >= i.member.roles.highest.position) {
+    return { red: 'Kendinle aynı ya da senden üst rütbedeki kişiye rol veremezsin.' };
+  }
+  return { m };
+}
+
+/* ------------------------- Günün Yetkilisi ------------------------- */
+// Her gün TR saatiyle 00:00'da, bir önceki günün en çok mesai yapan yetkilisini kanala atar
+async function gunlukKontrol() {
+  try {
+    const ds = dayStart(Date.now());
+    if (!data.meta.lastDay) { data.meta.lastDay = ds; save(); return; }
+    if (data.meta.lastDay >= ds) return;
+    data.meta.lastDay = ds; save();
+
+    const from = ds - 86400000;
+    const list = totals(from, ds);
+    if (!list.length) return;
+    const ch = await client.channels.fetch(GUNUN_YETKILISI_KANAL_ID).catch(() => null);
+    if (!ch?.isTextBased()) return;
+
+    const [id, ms] = list[0];
+    const tarih = new Date(from).toLocaleDateString('tr-TR', { timeZone: 'Europe/Istanbul' });
+    const medals = ['🥈', '🥉'];
+    const embed = new EmbedBuilder().setColor(0xf1c40f).setTitle('🌟 Günün Yetkilisi')
+      .setDescription(`**${tarih}** günün yetkilisi <@${id}>!\n⏱️ Mesai süresi: \`${fmtDur(ms)}\`\n\nEmeğin için teşekkürler, tebrikler! 🎉`)
+      .setTimestamp();
+    if (list.length > 1) embed.addFields({ name: '🏅 Diğer Aktifler', value: list.slice(1, 3).map(([u, t], n) => `${medals[n]} <@${u}> — \`${fmtDur(t)}\``).join('\n') });
+    const u = await client.users.fetch(id).catch(() => null);
+    if (u) embed.setThumbnail(u.displayAvatarURL());
+    await ch.send({ embeds: [embed] });
+  } catch (e) { console.error('Günün yetkilisi hatası:', e); }
+}
+
 async function bilesenIslem(i) {
+  // Yetki verme: kişi seçildi -> rol menüsü
+  if (i.isUserSelectMenu() && i.customId === 'yetki_user') {
+    const hedefId = i.values[0];
+    const k = await yetkiKontrol(i, hedefId);
+    if (k.red) return await i.reply({ content: `❌ ${k.red}`, flags: MessageFlags.Ephemeral });
+    const verilebilir = kurucuKisi(i) ? null : [...i.guild.roles.cache.values()].filter((r) => !yetkiRolRed(i, r)).sort((a, b) => b.position - a.position);
+    const menu = new RoleSelectMenuBuilder().setCustomId(`yetki_rol_${hedefId}`).setPlaceholder('Verilecek rolü seç...').setMinValues(1).setMaxValues(1);
+    return await i.reply({
+      content: `<@${hedefId}> kişisine verilecek rolü seç.\n**Verebileceğin roller:** ${verilebilir ? (verilebilir.map((r) => `<@&${r.id}>`).join(', ') || '*yok*') : 'tüm roller (botun rolünün altındakiler)'}`,
+      components: [new ActionRowBuilder().addComponents(menu)],
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+
+  // Yetki verme: rol seçildi -> rolü ver
+  if (i.isRoleSelectMenu() && i.customId.startsWith('yetki_rol_')) {
+    const hedefId = i.customId.slice('yetki_rol_'.length);
+    const rol = i.guild.roles.cache.get(i.values[0]);
+    if (!rol) return await i.reply({ content: '❌ Rol bulunamadı.', flags: MessageFlags.Ephemeral });
+    const k = await yetkiKontrol(i, hedefId);
+    if (k.red) return await i.reply({ content: `❌ ${k.red}`, flags: MessageFlags.Ephemeral });
+    const red = yetkiRolRed(i, rol);
+    if (red) return await i.reply({ content: `❌ ${red}`, flags: MessageFlags.Ephemeral });
+    if (k.m.roles.cache.has(rol.id)) return await i.reply({ content: '❌ Bu kişide bu rol zaten var.', flags: MessageFlags.Ephemeral });
+
+    await k.m.roles.add(rol, `${i.user.tag} (yetki paneli)`);
+    i.channel.send({ embeds: [new EmbedBuilder().setColor(0x9b59b6).setTitle('🎖️ Yetki Verildi')
+      .addFields(
+        { name: 'Kişi', value: `<@${hedefId}>`, inline: true },
+        { name: 'Rol', value: `<@&${rol.id}>`, inline: true },
+        { name: 'Veren', value: `<@${i.user.id}>`, inline: true },
+      ).setTimestamp()], allowedMentions: { parse: [] } }).catch(() => {});
+    return await i.update({ content: `✅ <@${hedefId}> kişisine <@&${rol.id}> rolü verildi.`, components: [] });
+  }
+
   // Yetkili uyarı: kişi seçildi -> seviye menüsü
   if (i.isUserSelectMenu() && i.customId === 'uyari_user') {
     const hedefId = i.values[0];
@@ -931,5 +1085,5 @@ function cekilisKontrol() {
 }
 
 process.on('unhandledRejection', (e) => console.error('Yakalanmamış hata:', e));
-console.log('SÜRÜM: ban-panel-v11');
+console.log('SÜRÜM: ban-panel-v12');
 client.login(TOKEN);
