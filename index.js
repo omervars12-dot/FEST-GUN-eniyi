@@ -20,7 +20,7 @@ const { joinVoiceChannel, VoiceConnectionStatus, entersState, getVoiceConnection
 const dir = process.env.DATA_DIR || path.join(__dirname, 'data');
 fs.mkdirSync(dir, { recursive: true });
 const dbFile = path.join(dir, 'db.json');
-let data = { mesai: [], aktif: {}, destek: {}, bans: [], olusumlar: [], meta: {} };
+let data = { mesai: [], aktif: {}, destek: {}, bans: [], olusumlar: [], meta: {}, uyarilar: {}, cekilisler: {} };
 try { data = { ...data, ...JSON.parse(fs.readFileSync(dbFile, 'utf8')) }; } catch {}
 function save() {
   const tmp = dbFile + '.tmp';
@@ -41,9 +41,10 @@ const UYE_ROL_ID = process.env.UYE_ROL_ID || '1542925356984565962'; // /member i
 // Bu rollere sahip kişilere uyarı verilemez. Birden fazla ise virgülle ayır. Kapatmak için Railway'de UYARI_KORUMALI_ROL_ID=yok yaz.
 const KORUMALI_ROLLER = (process.env.UYARI_KORUMALI_ROL_ID || '1542925356984565962').split(',').map((x) => x.trim()).filter((x) => x && x.toLowerCase() !== 'yok');
 const SUPER_UYARI_ROL_ID = process.env.SUPER_UYARI_ROL_ID || '1542874337546338386'; // bu rol herkese uyarı verebilir (rütbe ve korumalı rol sınırı yok)
-const superUyarici = (member) => !!member?.roles?.cache?.has(SUPER_UYARI_ROL_ID);
+const UYARI_VEREN_ROL_ID = process.env.UYARI_VEREN_ROL_ID || '1542872127105933342'; // bu rol de uyarı verebilir
+const superUyarici = (member) => !!member?.roles?.cache?.has(SUPER_UYARI_ROL_ID) || !!member?.roles?.cache?.has(UYARI_VEREN_ROL_ID);
 const uyariIslemi = (i) => (i.isChatInputCommand() && i.commandName === 'yetkili') || (!i.isChatInputCommand() && typeof i.customId === 'string' && i.customId.startsWith('uyari_'));
-const UYARI_MAX = 5; // 5. uyarıda ban
+const UYARI_MAX = 5; // 5x uyarıda ban
 // logo.png yoksa bot çökmesin, logosuz çalışsın
 const LOGO_YOLU = path.join(__dirname, 'logo.png');
 const LOGO_VAR = fs.existsSync(LOGO_YOLU);
@@ -157,6 +158,8 @@ const commands = [
   new SlashCommandBuilder().setName('member').setDescription('Hiçbir rolü olmayan herkese otomatik üye rolü ver (sadece kurucu)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
+  new SlashCommandBuilder().setName('cekilis').setDescription('Çekiliş başlat (@everyone atar)'),
+
   new SlashCommandBuilder().setName('dmduyuru').setDescription('Sunucudaki herkese DM duyurusu gönder')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 ].map((c) => c.toJSON());
@@ -169,6 +172,9 @@ async function korumaKontrol() {
       const sr = g.roles.cache.get(SUPER_UYARI_ROL_ID);
       if (sr) console.log(`⭐ Süper uyarı rolü: "${sr.name}" — ${sr.members.size} üye (herkese uyarı verebilir).`);
       else console.warn(`⚠️ Süper uyarı rolü bulunamadı (${SUPER_UYARI_ROL_ID}).`);
+      const ur = g.roles.cache.get(UYARI_VEREN_ROL_ID);
+      if (ur) console.log(`⭐ Uyarı veren rol: "${ur.name}" — ${ur.members.size} üye.`);
+      else console.warn(`⚠️ Uyarı veren rol bulunamadı (${UYARI_VEREN_ROL_ID}).`);
       for (const id of KORUMALI_ROLLER) {
         const r = g.roles.cache.get(id);
         if (id === g.id) console.warn(`⚠️ Korumalı rol ID'si @everyone (sunucu ID'si) — herkes korunmuş olur! UYARI_KORUMALI_ROL_ID'yi düzelt.`);
@@ -211,6 +217,8 @@ async function hazir() {
   sesKanalinaGir();
   haftalikKontrol();
   setInterval(haftalikKontrol, 60 * 1000);
+  cekilisKontrol();
+  setInterval(cekilisKontrol, 15 * 1000);
 }
 client.once('clientReady', hazir);
 client.once('ready', hazir);
@@ -268,7 +276,7 @@ client.on('interactionCreate', async (i) => {
   try {
     // Botu sadece belirlenen rol (ve sunucu sahibi) kullanabilir
     if (!i.guild) return;
-    const izinli = i.user.id === i.guild.ownerId || (KURUCU_ID && i.user.id === KURUCU_ID) || i.member?.roles?.cache?.has(KOMUT_ROL_ID) || (superUyarici(i.member) && uyariIslemi(i));
+    const izinli = i.user.id === i.guild.ownerId || (KURUCU_ID && i.user.id === KURUCU_ID) || i.member?.roles?.cache?.has(KOMUT_ROL_ID) || (superUyarici(i.member) && uyariIslemi(i)) || (i.isButton() && i.customId === 'cekilis_katil');
     if (!izinli) {
       return await i.reply({ content: `⛔ Bu botu kullanmak için <@&${KOMUT_ROL_ID}> rolüne sahip olmalısın.`, flags: MessageFlags.Ephemeral });
     }
@@ -461,6 +469,17 @@ client.on('interactionCreate', async (i) => {
         break;
       }
 
+      case 'cekilis': {
+        const modal = new ModalBuilder().setCustomId('cekilis_modal').setTitle('Çekiliş Oluştur');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('odul').setLabel('Ödül / Başlık').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(100)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('aciklama').setLabel('Açıklama (istediğini yaz)').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(800)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sure').setLabel('Süre (örn: 30dk, 2sa, 1g)').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(10)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('kazanan').setLabel('Kazanan sayısı').setStyle(TextInputStyle.Short).setRequired(true).setValue('1').setMaxLength(2)),
+        );
+        return await i.showModal(modal);
+      }
+
       case 'dmduyuru': {
         const modal = new ModalBuilder().setCustomId('dmduyuru_modal').setTitle('DM Duyurusu');
         modal.addComponents(
@@ -478,7 +497,6 @@ client.on('interactionCreate', async (i) => {
   }
 });
 
-/* ------------------------- DM Duyuru ------------------------- */
 /* ------------------------- Ban Logu ------------------------- */
 const panelBanlari = new Set(); // panelden atılan banlar (çift log olmasın)
 
@@ -586,10 +604,11 @@ function uyariPanelMesaji() {
   const embed = new EmbedBuilder()
     .setColor(0xf39c12)
     .setTitle('⚠️ Yetkili Uyarı Paneli')
-    .setDescription('Aşağıdan bir yetkili seç, sebebini yaz ve uyarıyı ver.')
+    .setDescription('Aşağıdan bir yetkili seç, uyarı seviyesini (1x-5x) seç, sebebini yaz ve uyarıyı ver.')
     .addFields(
       { name: '📈 Uyarı Basamakları', value: '`1x` → 1x Uyarı rolü\n`2x` → 2x Uyarı rolü\n`3x` → 3x Uyarı rolü\n`4x` → 4x Uyarı rolü\n`5x` → **Sunucudan BAN** 🔨' },
-      { name: '📜 Kurallar', value: `Sadece **kendinden alt** roldeki kişilere uyarı verebilirsin.\nKorumalı role sahip kişilere uyarı verilemez.\n<@&${SUPER_UYARI_ROL_ID}> rolü bu sınırlardan muaftır, herkese uyarı verebilir.` },
+      { name: '➕ Toplama', value: 'Verilen uyarı mevcut uyarıya eklenir. Örn: 2x uyarısı olana 2x daha verirsen eski rol silinir, **4x** olur. Toplam 5x ve üstü = ban.' },
+      { name: '📜 Kurallar', value: `Sadece **kendinden alt** roldeki kişilere uyarı verebilirsin.\nKorumalı role sahip kişilere uyarı verilemez.\n<@&${SUPER_UYARI_ROL_ID}> ve <@&${UYARI_VEREN_ROL_ID}> rolleri bu sınırlardan muaftır, herkese uyarı verebilir.` },
     )
     .setFooter({ text: 'Fest Gun Moderation' })
     .setTimestamp();
@@ -631,13 +650,31 @@ async function uyariKontrol(i, hedefId) {
 }
 
 async function bilesenIslem(i) {
-  // Yetkili uyarı: kişi seçildi -> sebep formu
+  // Yetkili uyarı: kişi seçildi -> seviye menüsü
   if (i.isUserSelectMenu() && i.customId === 'uyari_user') {
     const hedefId = i.values[0];
     const k = await uyariKontrol(i, hedefId);
     if (k.red) return await i.reply({ content: `❌ ${k.red}`, flags: MessageFlags.Ephemeral });
-    const sayi = (data.uyarilar?.[hedefId]?.sayi || 0) + 1;
-    const modal = new ModalBuilder().setCustomId(`uyari_modal_${hedefId}`).setTitle(`Uyarı Sebebi (${sayi}/${UYARI_MAX})`);
+    const mevcut = data.uyarilar?.[hedefId]?.sayi || 0;
+    const menu = new StringSelectMenuBuilder().setCustomId(`uyari_seviye_${hedefId}`).setPlaceholder('Kaç x uyarı verilecek?')
+      .addOptions([1, 2, 3, 4, 5].map((n) => {
+        const t = mevcut + n;
+        return { label: `${n}x Uyarı`, value: String(n), description: (t >= UYARI_MAX ? `Toplam ${t}x → SUNUCUDAN BAN` : `Toplam ${t}x olacak`).slice(0, 100) };
+      }));
+    return await i.reply({
+      content: `<@${hedefId}> için uyarı seviyesini seç. Şu anki uyarısı: **${mevcut}x**`,
+      components: [new ActionRowBuilder().addComponents(menu)],
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+
+  // Yetkili uyarı: seviye seçildi -> sebep formu
+  if (i.isStringSelectMenu() && i.customId.startsWith('uyari_seviye_')) {
+    const hedefId = i.customId.slice('uyari_seviye_'.length);
+    const seviye = i.values[0];
+    const k = await uyariKontrol(i, hedefId);
+    if (k.red) return await i.reply({ content: `❌ ${k.red}`, flags: MessageFlags.Ephemeral });
+    const modal = new ModalBuilder().setCustomId(`uyari_modal_${hedefId}_${seviye}`).setTitle(`${seviye}x Uyarı Sebebi`);
     modal.addComponents(new ActionRowBuilder().addComponents(
       new TextInputBuilder().setCustomId('sebep').setLabel('Sebep').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(300),
     ));
@@ -646,7 +683,8 @@ async function bilesenIslem(i) {
 
   // Yetkili uyarı: form gönderildi
   if (i.isModalSubmit() && i.customId.startsWith('uyari_modal_')) {
-    const hedefId = i.customId.slice('uyari_modal_'.length);
+    const [hedefId, seviyeStr] = i.customId.slice('uyari_modal_'.length).split('_');
+    const eklenen = Math.min(UYARI_MAX, Math.max(1, parseInt(seviyeStr, 10) || 1));
     const sebep = i.fields.getTextInputValue('sebep');
     const k = await uyariKontrol(i, hedefId);
     if (k.red) return await i.reply({ content: `❌ ${k.red}`, flags: MessageFlags.Ephemeral });
@@ -654,38 +692,55 @@ async function bilesenIslem(i) {
 
     const m = k.m;
     const kayit = ((data.uyarilar ||= {})[hedefId] ||= { sayi: 0, kayit: [] });
-    const yeniSayi = kayit.sayi + 1;
+    const eskiSayi = kayit.sayi;
+    const yeniSayi = eskiSayi + eklenen; // 2x varken 2x daha = 4x, 5 ve üstü = ban
     let sonuc;
 
     if (yeniSayi >= UYARI_MAX) {
-      panelBanlari.add(hedefId); setTimeout(() => panelBanlari.delete(hedefId), 30000);
       if (!m.bannable) return await i.editReply('❌ Bu kişiyi banlayamam (rolü benden üstte).');
-      await i.guild.members.ban(hedefId, { reason: `${UYARI_MAX}x yetkili uyarısı — son uyarı: ${i.user.tag}: ${sebep}` });
+      panelBanlari.add(hedefId); setTimeout(() => panelBanlari.delete(hedefId), 30000);
+      await i.guild.members.ban(hedefId, { reason: `${UYARI_MAX}x yetkili uyarısı — ${i.user.tag}: ${sebep}` });
       data.bans.push({ id: hedefId, tag: m.user.tag, yetkili: i.user.id, sebep: `${UYARI_MAX}x uyarı: ${sebep}`, t: Date.now() });
-      sonuc = `🔨 <@${hedefId}> **${UYARI_MAX}. uyarısını** aldı ve sunucudan **banlandı**.`;
+      sonuc = `🔨 <@${hedefId}> **${eklenen}x** uyarı aldı (toplam ${eskiSayi}x → ${UYARI_MAX}x) ve sunucudan **banlandı**.`;
     } else {
       const roller = await uyariRolleri(i.guild);
       await m.roles.remove(roller.filter((r) => m.roles.cache.has(r.id)), 'Yetkili uyarı güncellendi').catch(() => {});
       await m.roles.add(roller[yeniSayi - 1], `${yeniSayi}x uyarı — ${i.user.tag}`);
-      sonuc = `⚠️ <@${hedefId}> yetkilisine **${yeniSayi}x Uyarı** verildi. (${yeniSayi}/${UYARI_MAX})`;
+      sonuc = `⚠️ <@${hedefId}> yetkilisine **${eklenen}x** uyarı verildi. (${eskiSayi}x → **${yeniSayi}x**)`;
     }
 
-    kayit.sayi = yeniSayi;
-    kayit.kayit.push({ t: Date.now(), yetkili: i.user.id, sebep });
+    kayit.sayi = Math.min(yeniSayi, UYARI_MAX);
+    kayit.kayit.push({ t: Date.now(), yetkili: i.user.id, sebep, eklenen });
     save();
 
-    const embed = new EmbedBuilder().setColor(yeniSayi >= UYARI_MAX ? 0xe74c3c : 0xf39c12)
-      .setTitle(yeniSayi >= UYARI_MAX ? '🔨 Yetkili 5. Uyarıda Banlandı' : `⚠️ Yetkili Uyarısı (${yeniSayi}/${UYARI_MAX})`)
+    const banli = yeniSayi >= UYARI_MAX;
+    const embed = new EmbedBuilder().setColor(banli ? 0xe74c3c : 0xf39c12)
+      .setTitle(banli ? '🔨 Yetkili 5x Uyarıda Banlandı' : `⚠️ Yetkili Uyarısı (${yeniSayi}/${UYARI_MAX})`)
       .setThumbnail(m.user.displayAvatarURL())
       .addFields(
         { name: 'Yetkili', value: `<@${hedefId}> (${hedefId})` },
         { name: 'Uyaran', value: `<@${i.user.id}>`, inline: true },
-        { name: 'Uyarı Sayısı', value: `${yeniSayi}/${UYARI_MAX}`, inline: true },
+        { name: 'Verilen', value: `${eklenen}x`, inline: true },
+        { name: 'Toplam', value: `${eskiSayi}x → ${Math.min(yeniSayi, UYARI_MAX)}x`, inline: true },
         { name: 'Sebep', value: sebep },
       ).setTimestamp();
     const lg = await banLogGonder(embed, UYARI_LOG_KANAL_ID);
-    if (yeniSayi >= UYARI_MAX) banLogGonder(EmbedBuilder.from(embed).addFields({ name: 'Kaynak', value: 'Yetkili Uyarı Sistemi', inline: true }));
+    if (banli) banLogGonder(EmbedBuilder.from(embed).addFields({ name: 'Kaynak', value: 'Yetkili Uyarı Sistemi', inline: true }));
     return await i.editReply(`${sonuc}${lg.ok ? '' : `\n⚠️ Log kanalına yazılamadı: ${lg.hata}`}`);
+  }
+
+  // Çekiliş formu
+  if (i.isModalSubmit() && i.customId === 'cekilis_modal') return cekilisBaslat(i);
+
+  // Çekiliş katıl / ayrıl
+  if (i.isButton() && i.customId === 'cekilis_katil') {
+    const c = data.cekilisler?.[i.message.id];
+    if (!c || c.bitti) return await i.reply({ content: '❌ Bu çekiliş sona erdi.', flags: MessageFlags.Ephemeral });
+    const idx = c.katilanlar.indexOf(i.user.id);
+    if (idx >= 0) c.katilanlar.splice(idx, 1); else c.katilanlar.push(i.user.id);
+    save();
+    await i.update({ embeds: [cekilisEmbed(c)], components: [cekilisButon(false)] });
+    return await i.followUp({ content: idx >= 0 ? '➖ Çekilişten ayrıldın.' : '✅ Çekilişe katıldın, bol şans!', flags: MessageFlags.Ephemeral });
   }
 
   // DM duyuru formu
@@ -769,6 +824,7 @@ async function bilesenIslem(i) {
   }
 }
 
+/* ------------------------- DM Duyuru ------------------------- */
 async function dmDuyuruGonder(i) {
   if (!i.memberPermissions.has(PermissionFlagsBits.Administrator)) return await hata(i, 'Yetkin yok.');
   const baslik = i.fields.getTextInputValue('baslik');
@@ -789,6 +845,91 @@ async function dmDuyuruGonder(i) {
   await i.editReply(`✅ Duyuru tamamlandı.\nBaşarılı: **${ok}** • DM kapalı/başarısız: **${fail}**`).catch(() => {});
 }
 
+/* ------------------------- Çekiliş ------------------------- */
+const CEKILIS_BANNER = process.env.CEKILIS_BANNER || 'https://media.discordapp.net/attachments/1542872935809814688/1543803508547915786/ChatGPT_Image_31_Agu_2026_05_01_30.png?ex=6ac4ffce&is=6ac3ae4e&hm=9af7022840d6b81cdba878fed9cde37240e436af2740f5f4a0c12ca8d25b575e&=&format=webp&quality=lossless';
+const CEKILIS_PNG = path.join(__dirname, 'cekilis.png'); // bu dosya varsa banner olarak o kullanılır (link süresi dolmaz)
+const CEKILIS_PNG_VAR = fs.existsSync(CEKILIS_PNG);
+
+function sureCoz(s) {
+  const m = String(s).trim().toLowerCase().match(/^(\d+)\s*(dk|dakika|m|sa|saat|h|g|gün|gun|d)?$/);
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  const u = m[2] || 'dk';
+  const k = ['sa', 'saat', 'h'].includes(u) ? 3600e3 : ['g', 'gün', 'gun', 'd'].includes(u) ? 86400e3 : 60e3;
+  return n * k;
+}
+
+function cekilisEmbed(c) {
+  const bitis = Math.floor(c.bitis / 1000);
+  const e = new EmbedBuilder()
+    .setColor(c.bitti ? 0x95a5a6 : 0xf1c40f)
+    .setTitle(`🎉 ${c.odul}`)
+    .setDescription((c.aciklama ? `${c.aciklama.split('\n').map((x) => `> ${x}`).join('\n')}\n\n` : '') + (c.bitti ? '**Çekiliş sona erdi.**' : 'Katılmak için aşağıdaki **🎉 Katıl** butonuna bas!'))
+    .addFields(
+      { name: '🎁 Ödül', value: c.odul, inline: true },
+      { name: '👑 Kazanan', value: `${c.kazanan}`, inline: true },
+      { name: '👥 Katılımcı', value: `${c.katilanlar.length}`, inline: true },
+      { name: '⏰ Bitiş', value: c.bitti ? `<t:${bitis}:F>` : `<t:${bitis}:R> (<t:${bitis}:F>)` },
+      { name: '🛡️ Düzenleyen', value: `<@${c.host}>`, inline: true },
+    )
+    .setImage(CEKILIS_PNG_VAR ? 'attachment://cekilis.png' : CEKILIS_BANNER)
+    .setFooter({ text: `${BOT_ADI} Çekiliş` })
+    .setTimestamp();
+  if (c.bitti) e.addFields({ name: '🏆 Kazananlar', value: c.kazananlar?.length ? c.kazananlar.map((u) => `<@${u}>`).join(', ') : 'Katılım olmadı.' });
+  return e;
+}
+
+const cekilisButon = (bitti) => new ActionRowBuilder().addComponents(
+  new ButtonBuilder().setCustomId('cekilis_katil').setLabel('Katıl').setEmoji('🎉').setStyle(ButtonStyle.Success).setDisabled(bitti),
+);
+
+async function cekilisBaslat(i) {
+  const odul = i.fields.getTextInputValue('odul').trim();
+  const aciklama = i.fields.getTextInputValue('aciklama')?.trim() || '';
+  const sureMs = sureCoz(i.fields.getTextInputValue('sure'));
+  const kazanan = parseInt(i.fields.getTextInputValue('kazanan'), 10);
+  if (!sureMs || sureMs < 60e3) return await i.reply({ content: '❌ Süre geçersiz. Örnek: `30dk`, `2sa`, `1g` (en az 1 dk).', flags: MessageFlags.Ephemeral });
+  if (!kazanan || kazanan < 1 || kazanan > 20) return await i.reply({ content: '❌ Kazanan sayısı 1-20 arası olmalı.', flags: MessageFlags.Ephemeral });
+  await i.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const c = { kanal: i.channelId, odul, aciklama, bitis: Date.now() + sureMs, kazanan, katilanlar: [], host: i.user.id, bitti: false };
+  const msg = await i.channel.send({
+    content: '@everyone',
+    embeds: [cekilisEmbed(c)],
+    components: [cekilisButon(false)],
+    files: CEKILIS_PNG_VAR ? [new AttachmentBuilder(CEKILIS_PNG, { name: 'cekilis.png' })] : [],
+    allowedMentions: { parse: ['everyone'] },
+  });
+  (data.cekilisler ||= {})[msg.id] = c;
+  save();
+  return await i.editReply('✅ Çekiliş başlatıldı.');
+}
+
+async function cekilisBitir(id) {
+  const c = data.cekilisler?.[id];
+  if (!c || c.bitti) return;
+  c.bitti = true;
+  const havuz = [...c.katilanlar];
+  const kazananlar = [];
+  while (kazananlar.length < c.kazanan && havuz.length) kazananlar.push(havuz.splice(Math.floor(Math.random() * havuz.length), 1)[0]);
+  c.kazananlar = kazananlar;
+  save();
+  const ch = await client.channels.fetch(c.kanal).catch(() => null);
+  if (!ch?.isTextBased()) return;
+  const msg = await ch.messages.fetch(id).catch(() => null);
+  if (msg) await msg.edit({ embeds: [cekilisEmbed(c)], components: [cekilisButon(true)] }).catch(() => {});
+  await ch.send({
+    content: kazananlar.length
+      ? `🎉 Tebrikler ${kazananlar.map((u) => `<@${u}>`).join(', ')}! **${c.odul}** kazandınız!`
+      : `😔 **${c.odul}** çekilişine kimse katılmadı.`,
+    allowedMentions: { users: kazananlar },
+  }).catch(() => {});
+}
+
+function cekilisKontrol() {
+  for (const [id, c] of Object.entries(data.cekilisler || {})) if (!c.bitti && c.bitis <= Date.now()) cekilisBitir(id);
+}
+
 process.on('unhandledRejection', (e) => console.error('Yakalanmamış hata:', e));
-console.log('SÜRÜM: ban-panel-v10');
+console.log('SÜRÜM: ban-panel-v11');
 client.login(TOKEN);
