@@ -39,6 +39,11 @@ const YETKI_LOG_KANAL_ID = process.env.YETKI_LOG_KANAL_ID || '155748637404587627
 const SIKAYET_LOG_KANAL_ID = process.env.SIKAYET_LOG_KANAL_ID || '1557486663939395674'; // yetkili şikayet logları
 // Panelin ve şikayet logunun arkasındaki görsel
 const SIKAYET_GORSEL = process.env.SIKAYET_GORSEL || 'https://media.discordapp.net/attachments/1529424223037161533/1556448842910670949/image.png?backend=b2&ex=6ac77f31&is=6ac62db1&hm=3b3deb0cd51c0ce018b51c484f00418dafd4802e1aff446fc5049c7b9ae7bc31&=&format=webp&quality=lossless&width=1536&height=864';
+// Sadece bu rollere sahip kişiler şikayet edilebilir
+const SIKAYET_EDILEBILIR_ROLLER = (process.env.SIKAYET_EDILEBILIR_ROLLER || '1557449922347929771,1557449903872155770').split(',').map((x) => x.trim()).filter(Boolean);
+// /wl komutu: bu roller herkese verilir, silinecek rol herkesten alınır
+const WL_VERILECEK_ROLLER = (process.env.WL_VERILECEK_ROLLER || '1557449981395337236,1557449979075891282').split(',').map((x) => x.trim()).filter(Boolean);
+const WL_ALINACAK_ROL_ID = process.env.WL_ALINACAK_ROL_ID || '1557449989607788584';
 const SIKAYET_BEKLEME_MS = 3 * 60 * 1000; // aynı kişi art arda şikayet atamasın (3 dk)
 const sikayetBekleme = new Map();
 const BAN_LIMIT = 5; // en fazla biriken ban hakkı (her saat 1 hak yenilenir)
@@ -180,6 +185,9 @@ const commands = [
     .addSubcommand((s) => s.setName('paneli').setDescription('Yetki verme panelini aç')),
 
   new SlashCommandBuilder().setName('dmduyuru').setDescription('Sunucudaki herkese DM duyurusu gönder')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder().setName('wl').setDescription('Herkese WL rollerini verir, eski WL rolünü alır (sadece kurucu)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder().setName('ytsikayet').setDescription('Yetkili şikayet panelini kur (sadece yönetici)')
@@ -529,6 +537,50 @@ client.on('interactionCreate', async (i) => {
         break;
       }
 
+      case 'wl': {
+        if (!kurucuKisi(i)) return await hata(i, 'Bu komutu sadece sunucu kurucusu kullanabilir.');
+
+        const verilecek = [];
+        for (const id of WL_VERILECEK_ROLLER) {
+          const r = await i.guild.roles.fetch(id).catch(() => null);
+          if (!r) return await hata(i, `Verilecek rol bulunamadı (${id}).`);
+          if (r.managed || r.position >= i.guild.members.me.roles.highest.position) return await hata(i, `${r.name} rolünü veremem (botun rolü bu rolden düşük ya da bot rolü).`);
+          verilecek.push(r);
+        }
+        const alinacak = await i.guild.roles.fetch(WL_ALINACAK_ROL_ID).catch(() => null);
+        if (!alinacak) return await hata(i, `Silinecek rol bulunamadı (${WL_ALINACAK_ROL_ID}).`);
+        if (alinacak.managed || alinacak.position >= i.guild.members.me.roles.highest.position) return await hata(i, `${alinacak.name} rolünü alamam (botun rolü bu rolden düşük ya da bot rolü).`);
+
+        await i.deferReply({ flags: MessageFlags.Ephemeral });
+        const tum = await i.guild.members.fetch();
+        const hedefler = [...tum.values()].filter((x) => !x.user.bot);
+
+        let verilen = 0, alinan = 0, fail = 0, n = 0;
+        for (const x of hedefler) {
+          n++;
+          const eksik = verilecek.filter((r) => !x.roles.cache.has(r.id));
+          const silinecek = x.roles.cache.has(alinacak.id);
+          if (!eksik.length && !silinecek) continue;
+          try {
+            if (eksik.length) { await x.roles.add(eksik, `/wl — ${i.user.tag}`); verilen++; }
+            if (silinecek) { await x.roles.remove(alinacak, `/wl — ${i.user.tag}`); alinan++; }
+          } catch { fail++; }
+          if (n % 20 === 0) await i.editReply(`⏳ İşleniyor... ${n}/${hedefler.length}`).catch(() => {});
+          await new Promise((r) => setTimeout(r, 400)); // rate limit koruması
+        }
+
+        const sonEmbed = new EmbedBuilder().setColor(0x2ecc71).setTitle('✅ WL Tamamlandı')
+          .setDescription(`Toplam **${hedefler.length}** üye tarandı.`)
+          .addFields(
+            { name: 'Rol verilen', value: `**${verilen}** kişi\n${verilecek.map((r) => `<@&${r.id}>`).join(' ')}`, inline: true },
+            { name: 'Rolü alınan', value: `**${alinan}** kişi\n<@&${alinacak.id}>`, inline: true },
+            { name: 'Hata', value: `**${fail}**`, inline: true },
+            { name: 'Yetkili', value: `<@${i.user.id}>` },
+          ).setTimestamp();
+        await i.editReply({ content: '', embeds: [sonEmbed] }).catch(() => {});
+        return await i.channel.send({ embeds: [sonEmbed], allowedMentions: { parse: [] } }).catch(() => {});
+      }
+
       case 'ytsikayet': {
         if (!i.memberPermissions.has(PermissionFlagsBits.Administrator) && !kurucuKisi(i)) return await hata(i, 'Bu paneli sadece yönetici kurabilir.');
         await i.channel.send(sikayetPanelMesaji());
@@ -844,6 +896,9 @@ async function bilesenIslem(i) {
     const m = await i.guild.members.fetch(hedefId).catch(() => null);
     if (!m) return await i.reply({ content: '❌ Bu kişi sunucuda değil.', flags: MessageFlags.Ephemeral });
     if (m.user.bot) return await i.reply({ content: '❌ Botlar şikayet edilemez.', flags: MessageFlags.Ephemeral });
+    if (!SIKAYET_EDILEBILIR_ROLLER.some((r) => m.roles.cache.has(r))) {
+      return await i.reply({ content: `❌ Sadece yetkililer şikayet edilebilir. Seçtiğin kişide yetkili rolü yok. Şikayet edilebilen roller: ${SIKAYET_EDILEBILIR_ROLLER.map((r) => `<@&${r}>`).join(', ')}`, flags: MessageFlags.Ephemeral });
+    }
 
     const modal = new ModalBuilder().setCustomId(`sikayet_modal_${hedefId}`).setTitle('Yetkili Şikayeti');
     modal.addComponents(
@@ -868,6 +923,8 @@ async function bilesenIslem(i) {
     const kanit = i.fields.getTextInputValue('kanit').trim();
     const tarih = i.fields.getTextInputValue('tarih').trim();
     const ek = i.fields.getTextInputValue('ek')?.trim() || '';
+    const hedefUye = await i.guild.members.fetch(hedefId).catch(() => null);
+    if (!hedefUye || !SIKAYET_EDILEBILIR_ROLLER.some((r) => hedefUye.roles.cache.has(r))) return await i.reply({ content: '❌ Sadece yetkililer şikayet edilebilir.', flags: MessageFlags.Ephemeral });
     await i.deferReply({ flags: MessageFlags.Ephemeral });
 
     const hedef = await client.users.fetch(hedefId).catch(() => null);
@@ -1220,5 +1277,5 @@ function cekilisKontrol() {
 }
 
 process.on('unhandledRejection', (e) => console.error('Yakalanmamış hata:', e));
-console.log('SÜRÜM: ban-panel-v13');
+console.log('SÜRÜM: ban-panel-v14');
 client.login(TOKEN);
