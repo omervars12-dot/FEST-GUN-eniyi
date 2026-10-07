@@ -20,7 +20,7 @@ const { joinVoiceChannel, VoiceConnectionStatus, entersState, getVoiceConnection
 const dir = process.env.DATA_DIR || path.join(__dirname, 'data');
 fs.mkdirSync(dir, { recursive: true });
 const dbFile = path.join(dir, 'db.json');
-let data = { mesai: [], aktif: {}, destek: {}, bans: [], olusumlar: [], meta: {}, uyarilar: {}, cekilisler: {} };
+let data = { mesai: [], aktif: {}, destek: {}, bans: [], olusumlar: [], meta: {}, uyarilar: {}, cekilisler: {}, sikayetler: [] };
 try { data = { ...data, ...JSON.parse(fs.readFileSync(dbFile, 'utf8')) }; } catch {}
 function save() {
   const tmp = dbFile + '.tmp';
@@ -31,10 +31,16 @@ function save() {
 const BOT_ADI = 'Fest Gun';
 const TOKEN = process.env.DISCORD_TOKEN;
 const GUILD_ID = process.env.GUILD_ID; // doluysa komutlar anında görünür
-const MESAI_KANAL_ID = process.env.MESAI_KANAL_ID || '1554566189391552554';
+const MESAI_KANAL_ID = process.env.MESAI_KANAL_ID || '1557450357683261490'; // yetkili aktiflik kanalı (haftalık tablo)
 const KURUCU_ID = process.env.KURUCU_ID || null; // sunucu sahibi dışında panel açabilecek ekstra kişi (opsiyonel)
 const BAN_LOG_KANAL_ID = process.env.BAN_LOG_KANAL_ID || '1542872504291561634';
-const UYARI_LOG_KANAL_ID = process.env.UYARI_LOG_KANAL_ID || '1542872591042216096'; // yetkili uyarı logları
+const UYARI_LOG_KANAL_ID = process.env.UYARI_LOG_KANAL_ID || '1557450369515130990'; // yetkili uyarı logları
+const YETKI_LOG_KANAL_ID = process.env.YETKI_LOG_KANAL_ID || '1557486374045876276'; // yetki verme logları
+const SIKAYET_LOG_KANAL_ID = process.env.SIKAYET_LOG_KANAL_ID || '1557486663939395674'; // yetkili şikayet logları
+// Panelin ve şikayet logunun arkasındaki görsel
+const SIKAYET_GORSEL = process.env.SIKAYET_GORSEL || 'https://media.discordapp.net/attachments/1529424223037161533/1556448842910670949/image.png?backend=b2&ex=6ac77f31&is=6ac62db1&hm=3b3deb0cd51c0ce018b51c484f00418dafd4802e1aff446fc5049c7b9ae7bc31&=&format=webp&quality=lossless&width=1536&height=864';
+const SIKAYET_BEKLEME_MS = 3 * 60 * 1000; // aynı kişi art arda şikayet atamasın (3 dk)
+const sikayetBekleme = new Map();
 const BAN_LIMIT = 5; // en fazla biriken ban hakkı (her saat 1 hak yenilenir)
 const KOMUT_ROL_ID = process.env.KOMUT_ROL_ID || '1542872257276149860'; // botu sadece bu rol kullanabilir
 const UYE_ROL_ID = process.env.UYE_ROL_ID || '1542925356984565962'; // /member ile verilecek rol
@@ -44,6 +50,8 @@ const SUPER_UYARI_ROL_ID = process.env.SUPER_UYARI_ROL_ID || '154287433754633838
 const UYARI_VEREN_ROL_ID = process.env.UYARI_VEREN_ROL_ID || '1542872127105933342'; // bu rol de uyarı verebilir
 const superUyarici = (member) => !!member?.roles?.cache?.has(SUPER_UYARI_ROL_ID) || !!member?.roles?.cache?.has(UYARI_VEREN_ROL_ID);
 const uyariIslemi = (i) => (i.isChatInputCommand() && i.commandName === 'yetkili') || (!i.isChatInputCommand() && typeof i.customId === 'string' && i.customId.startsWith('uyari_'));
+// Şikayet butonu / menüsü / formu herkese açık (komut rolü olmasa da kullanılabilir)
+const sikayetIslemi = (i) => !i.isChatInputCommand() && typeof i.customId === 'string' && (i.customId === 'sikayet_ac' || i.customId === 'sikayet_user' || i.customId.startsWith('sikayet_modal_'));
 const UYARI_MAX = 5; // 5x uyarıda ban
 // logo.png yoksa bot çökmesin, logosuz çalışsın
 const LOGO_YOLU = path.join(__dirname, 'logo.png');
@@ -53,7 +61,7 @@ const SES_KANAL_ID = process.env.SES_KANAL_ID || '1542872463870922814';
 const IC_YETKILI_ROL_ID = process.env.IC_YETKILI_ROL_ID || '1542872160979128362'; // /ic yetkili-çağır ile etiketlenecek ve DM atılacak rol
 const IC_BEKLEME_MS = 2 * 60 * 1000; // aynı kişi art arda yetkili çağıramasın (2 dk)
 const icBekleme = new Map();
-const GUNUN_YETKILISI_KANAL_ID = process.env.GUNUN_YETKILISI_KANAL_ID || '1554566189391552554'; // günün yetkilisi buraya atılır
+const GUNUN_YETKILISI_KANAL_ID = process.env.GUNUN_YETKILISI_KANAL_ID || '1557450357683261490'; // günün yetkilisi buraya atılır
 const YETKI_ALT_SAYISI = 2; // yetki verirken, KİŞİNİN kendi en üst rolünden en fazla kaç rütbe aşağıdaki roller verilebilir
 
 if (!TOKEN) {
@@ -173,6 +181,9 @@ const commands = [
 
   new SlashCommandBuilder().setName('dmduyuru').setDescription('Sunucudaki herkese DM duyurusu gönder')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder().setName('ytsikayet').setDescription('Yetkili şikayet panelini kur (sadece yönetici)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 ].map((c) => c.toJSON());
 
 /* ------------------------- Hazır ------------------------- */
@@ -225,6 +236,7 @@ async function hazir() {
 
   korumaKontrol();
   banLogTest();
+  kanalKontrol();
   sesKanalinaGir();
   haftalikKontrol();
   setInterval(haftalikKontrol, 60 * 1000);
@@ -278,7 +290,8 @@ async function haftalikKontrol() {
       const ch = await client.channels.fetch(MESAI_KANAL_ID).catch(() => null);
       if (ch?.isTextBased()) {
         const list = totals(prev, ws);
-        await ch.send({ embeds: [tabloEmbed('📊 Haftalık Mesai Tablosu', list, `${fmtDate(prev)} — ${fmtDate(ws)}`)] });
+        const haftaninYetkilisi = list[0] ? `\n🌟 **Haftanın Yetkilisi:** <@${list[0][0]}> — \`${fmtDur(list[0][1])}\`` : '';
+        await ch.send({ embeds: [tabloEmbed('📊 Haftalık Mesai Tablosu', list, `${fmtDate(prev)} — ${fmtDate(ws)}${haftaninYetkilisi}`)] });
       }
     }
   } catch (e) { console.error('Haftalık kontrol hatası:', e); }
@@ -289,7 +302,7 @@ client.on('interactionCreate', async (i) => {
   try {
     // Botu sadece belirlenen rol (ve sunucu sahibi) kullanabilir
     if (!i.guild) return;
-    const izinli = i.user.id === i.guild.ownerId || (KURUCU_ID && i.user.id === KURUCU_ID) || i.member?.roles?.cache?.has(KOMUT_ROL_ID) || (superUyarici(i.member) && uyariIslemi(i)) || (i.isButton() && i.customId === 'cekilis_katil') || (i.isChatInputCommand() && i.commandName === 'ic');
+    const izinli = i.user.id === i.guild.ownerId || (KURUCU_ID && i.user.id === KURUCU_ID) || i.member?.roles?.cache?.has(KOMUT_ROL_ID) || (superUyarici(i.member) && uyariIslemi(i)) || sikayetIslemi(i) || (i.isButton() && i.customId === 'cekilis_katil') || (i.isChatInputCommand() && i.commandName === 'ic');
     if (!izinli) {
       return await i.reply({ content: `⛔ Bu botu kullanmak için <@&${KOMUT_ROL_ID}> rolüne sahip olmalısın.`, flags: MessageFlags.Ephemeral });
     }
@@ -516,6 +529,12 @@ client.on('interactionCreate', async (i) => {
         break;
       }
 
+      case 'ytsikayet': {
+        if (!i.memberPermissions.has(PermissionFlagsBits.Administrator) && !kurucuKisi(i)) return await hata(i, 'Bu paneli sadece yönetici kurabilir.');
+        await i.channel.send(sikayetPanelMesaji());
+        return await i.reply({ content: '✅ Şikayet paneli kuruldu.', flags: MessageFlags.Ephemeral });
+      }
+
       case 'cekilis': {
         const modal = new ModalBuilder().setCustomId('cekilis_modal').setTitle('Çekiliş Oluştur');
         modal.addComponents(
@@ -551,14 +570,14 @@ async function banLogGonder(embed, kanalId = BAN_LOG_KANAL_ID) {
   try {
     const ch = await client.channels.fetch(kanalId);
     if (!ch || !ch.isTextBased()) return { ok: false, hata: 'Kanal bulunamadı ya da yazı kanalı değil' };
-    await ch.send({ embeds: [embed] });
+    await ch.send({ embeds: [embed], allowedMentions: { parse: [] } });
     return { ok: true };
   } catch (e) {
     const sebep = e.code === 10003 ? 'Kanal bulunamadı (ID yanlış ya da bot kanalı göremiyor)'
       : e.code === 50001 ? 'Botun bu kanalı görme yetkisi yok'
       : e.code === 50013 ? 'Botun bu kanala mesaj / embed gönderme yetkisi yok'
       : e.message;
-    console.error('❌ Ban log gönderilemedi:', e.code, e.message);
+    console.error('❌ Log gönderilemedi:', kanalId, e.code, e.message);
     return { ok: false, hata: sebep };
   }
 }
@@ -568,6 +587,23 @@ async function banLogTest() {
   console.log(r.ok ? '✅ Ban log kanalına test mesajı gönderildi.' : `❌ Ban log kanalına yazılamıyor: ${r.hata}`);
   const u = await banLogGonder(new EmbedBuilder().setColor(0xf39c12).setDescription('✅ Yetkili uyarı log sistemi aktif. Uyarılar bu kanala yazılacak.'), UYARI_LOG_KANAL_ID);
   console.log(u.ok ? '✅ Uyarı log kanalına test mesajı gönderildi.' : `❌ Uyarı log kanalına yazılamıyor: ${u.hata}`);
+}
+
+// Yeni kanalları mesaj atmadan sessizce kontrol eder (yetki / şikayet / aktiflik)
+async function kanalKontrol() {
+  const liste = [
+    ['Yetkili aktiflik kanalı', MESAI_KANAL_ID],
+    ['Günün yetkilisi kanalı', GUNUN_YETKILISI_KANAL_ID],
+    ['Yetki verme log kanalı', YETKI_LOG_KANAL_ID],
+    ['Şikayet log kanalı', SIKAYET_LOG_KANAL_ID],
+  ];
+  for (const [ad, id] of liste) {
+    const ch = await client.channels.fetch(id).catch(() => null);
+    if (!ch || !ch.isTextBased()) { console.error(`❌ ${ad} bulunamadı ya da botun erişimi yok (${id}).`); continue; }
+    const izin = ch.guild?.members?.me ? ch.permissionsFor(ch.guild.members.me) : null;
+    if (izin && !izin.has(['ViewChannel', 'SendMessages', 'EmbedLinks'])) console.error(`❌ ${ad}: botun Kanalı Gör / Mesaj Gönder / Bağlantı Yerleştir yetkisi eksik (${id}).`);
+    else console.log(`✅ ${ad} hazır: #${ch.name}`);
+  }
 }
 
 // Panel dışında (sağ tık, başka bot vs.) atılan banları da logla
@@ -740,6 +776,25 @@ async function yetkiKontrol(i, hedefId) {
   return { m };
 }
 
+/* ------------------------- Yetkili Şikayet Paneli ------------------------- */
+function sikayetPanelMesaji() {
+  const embed = new EmbedBuilder()
+    .setColor(0xc0392b)
+    .setTitle('📢 Fest Gun — Yetkili Şikayet Paneli')
+    .setDescription('Bir yetkili hakkında şikayetin mi var? Aşağıdaki **Şikayet Et** butonuna bas, şikayet ettiğin yetkiliyi seç, nedenini ve kanıtını yaz.')
+    .addFields(
+      { name: '📜 Kurallar', value: '• Şikayet nedenini açık ve doğru yaz.\n• **Kanıt zorunludur** (ekran görüntüsü / video linki, olay saati vb.).\n• Kanıtsız ve asılsız şikayetler dikkate alınmaz.\n• Sahte şikayet verenler hakkında işlem yapılabilir.' },
+      { name: '⏳ Bilgi', value: 'Şikayetin yönetime iletilir ve incelenir. Art arda şikayet atmak için birkaç dakika beklemen gerekir.' },
+    )
+    .setImage(SIKAYET_GORSEL)
+    .setFooter({ text: 'Fest Gun Moderation' })
+    .setTimestamp();
+  const satir = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('sikayet_ac').setLabel('Şikayet Et').setEmoji('📢').setStyle(ButtonStyle.Danger),
+  );
+  return { embeds: [embed], components: [satir] };
+}
+
 /* ------------------------- Günün Yetkilisi ------------------------- */
 // Her gün TR saatiyle 00:00'da, bir önceki günün en çok mesai yapan yetkilisini kanala atar
 async function gunlukKontrol() {
@@ -769,6 +824,83 @@ async function gunlukKontrol() {
 }
 
 async function bilesenIslem(i) {
+  // Şikayet: butona basıldı -> yetkili seçme menüsü
+  if (i.isButton() && i.customId === 'sikayet_ac') {
+    const kalan = (sikayetBekleme.get(i.user.id) || 0) + SIKAYET_BEKLEME_MS - Date.now();
+    if (kalan > 0) return await i.reply({ content: `❌ Az önce bir şikayet gönderdin. ${Math.ceil(kalan / 1000)} saniye sonra tekrar deneyebilirsin.`, flags: MessageFlags.Ephemeral });
+    const menu = new UserSelectMenuBuilder().setCustomId('sikayet_user').setPlaceholder('📢 Şikayet ettiğin yetkiliyi seç...').setMinValues(1).setMaxValues(1);
+    return await i.reply({
+      content: 'Şikayet etmek istediğin **yetkiliyi** seç:',
+      components: [new ActionRowBuilder().addComponents(menu)],
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+
+  // Şikayet: yetkili seçildi -> neden / kanıt formu
+  if (i.isUserSelectMenu() && i.customId === 'sikayet_user') {
+    const hedefId = i.values[0];
+    if (hedefId === i.user.id) return await i.reply({ content: '❌ Kendini şikayet edemezsin.', flags: MessageFlags.Ephemeral });
+    if (hedefId === client.user.id) return await i.reply({ content: '❌ Botu şikayet edemezsin.', flags: MessageFlags.Ephemeral });
+    const m = await i.guild.members.fetch(hedefId).catch(() => null);
+    if (!m) return await i.reply({ content: '❌ Bu kişi sunucuda değil.', flags: MessageFlags.Ephemeral });
+    if (m.user.bot) return await i.reply({ content: '❌ Botlar şikayet edilemez.', flags: MessageFlags.Ephemeral });
+
+    const modal = new ModalBuilder().setCustomId(`sikayet_modal_${hedefId}`).setTitle('Yetkili Şikayeti');
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sebep').setLabel('Şikayet nedeni').setStyle(TextInputStyle.Paragraph)
+        .setPlaceholder('Yetkili ne yaptı? Detaylı anlat.').setRequired(true).setMinLength(10).setMaxLength(800)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('kanit').setLabel('Kanıt (ekran görüntüsü / video linki)').setStyle(TextInputStyle.Paragraph)
+        .setPlaceholder('Imgur, YouTube, Discord medya linki vb. Kanıt zorunludur.').setRequired(true).setMinLength(5).setMaxLength(800)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('tarih').setLabel('Olayın yaşandığı tarih / saat').setStyle(TextInputStyle.Short)
+        .setPlaceholder('Örn: Bugün 21:30').setRequired(true).setMaxLength(100)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ek').setLabel('Eklemek istediğin başka bilgi (opsiyonel)').setStyle(TextInputStyle.Paragraph)
+        .setRequired(false).setMaxLength(500)),
+    );
+    return await i.showModal(modal);
+  }
+
+  // Şikayet: form gönderildi -> loga yaz
+  if (i.isModalSubmit() && i.customId.startsWith('sikayet_modal_')) {
+    const hedefId = i.customId.slice('sikayet_modal_'.length);
+    const kalan = (sikayetBekleme.get(i.user.id) || 0) + SIKAYET_BEKLEME_MS - Date.now();
+    if (kalan > 0) return await i.reply({ content: `❌ Az önce bir şikayet gönderdin. ${Math.ceil(kalan / 1000)} saniye sonra tekrar deneyebilirsin.`, flags: MessageFlags.Ephemeral });
+    const sebep = i.fields.getTextInputValue('sebep').trim();
+    const kanit = i.fields.getTextInputValue('kanit').trim();
+    const tarih = i.fields.getTextInputValue('tarih').trim();
+    const ek = i.fields.getTextInputValue('ek')?.trim() || '';
+    await i.deferReply({ flags: MessageFlags.Ephemeral });
+
+    const hedef = await client.users.fetch(hedefId).catch(() => null);
+    const liste = (data.sikayetler ||= []);
+    const no = (liste.length ? liste[liste.length - 1].no : 0) + 1;
+    liste.push({ no, sikayetci: i.user.id, hedef: hedefId, sebep, kanit, tarih, ek, t: Date.now() });
+    if (liste.length > 500) liste.splice(0, liste.length - 500);
+    save();
+    sikayetBekleme.set(i.user.id, Date.now());
+
+    const embed = new EmbedBuilder().setColor(0xc0392b).setTitle(`📢 Yeni Yetkili Şikayeti #${no}`)
+      .addFields(
+        { name: '👤 Şikayet Eden', value: `<@${i.user.id}> (${i.user.tag})`, inline: true },
+        { name: '🎯 Şikayet Edilen Yetkili', value: `<@${hedefId}> (${hedef?.tag || hedefId})`, inline: true },
+        { name: '🕒 Olay Tarihi', value: tarih },
+        { name: '📝 Şikayet Nedeni', value: sebep.slice(0, 1000) },
+        { name: '📎 Kanıt', value: kanit.slice(0, 1000) },
+      )
+      .setImage(SIKAYET_GORSEL)
+      .setFooter({ text: `Fest Gun Moderation • Şikayet #${no}` })
+      .setTimestamp();
+    if (ek) embed.addFields({ name: '💬 Ek Bilgi', value: ek.slice(0, 500) });
+    if (hedef) embed.setThumbnail(hedef.displayAvatarURL());
+
+    const lg = await banLogGonder(embed, SIKAYET_LOG_KANAL_ID);
+    if (!lg.ok) {
+      liste.pop(); save();
+      sikayetBekleme.delete(i.user.id);
+      return await i.editReply('❌ Şikayetin yönetime iletilemedi, lütfen daha sonra tekrar dene.');
+    }
+    return await i.editReply(`✅ Şikayetin yönetime iletildi. Şikayet no: **#${no}**\nİncelenecek, yanlış/asılsız şikayetlerde işlem yapılabilir.`);
+  }
+
   // Yetki verme: kişi seçildi -> rol menüsü
   if (i.isUserSelectMenu() && i.customId === 'yetki_user') {
     const hedefId = i.values[0];
@@ -795,12 +927,15 @@ async function bilesenIslem(i) {
     if (k.m.roles.cache.has(rol.id)) return await i.reply({ content: '❌ Bu kişide bu rol zaten var.', flags: MessageFlags.Ephemeral });
 
     await k.m.roles.add(rol, `${i.user.tag} (yetki paneli)`);
-    i.channel.send({ embeds: [new EmbedBuilder().setColor(0x9b59b6).setTitle('🎖️ Yetki Verildi')
+    const yetkiEmbed = new EmbedBuilder().setColor(0x9b59b6).setTitle('🎖️ Yetki Verildi')
+      .setThumbnail(k.m.user.displayAvatarURL())
       .addFields(
-        { name: 'Kişi', value: `<@${hedefId}>`, inline: true },
-        { name: 'Rol', value: `<@&${rol.id}>`, inline: true },
-        { name: 'Veren', value: `<@${i.user.id}>`, inline: true },
-      ).setTimestamp()], allowedMentions: { parse: [] } }).catch(() => {});
+        { name: 'Kişi', value: `<@${hedefId}> (${k.m.user.tag})`, inline: true },
+        { name: 'Rol', value: `<@&${rol.id}> (${rol.name})`, inline: true },
+        { name: 'Veren', value: `<@${i.user.id}> (${i.user.tag})`, inline: true },
+      ).setTimestamp();
+    i.channel.send({ embeds: [yetkiEmbed], allowedMentions: { parse: [] } }).catch(() => {});
+    banLogGonder(yetkiEmbed, YETKI_LOG_KANAL_ID);
     return await i.update({ content: `✅ <@${hedefId}> kişisine <@&${rol.id}> rolü verildi.`, components: [] });
   }
 
@@ -1085,5 +1220,5 @@ function cekilisKontrol() {
 }
 
 process.on('unhandledRejection', (e) => console.error('Yakalanmamış hata:', e));
-console.log('SÜRÜM: ban-panel-v12');
+console.log('SÜRÜM: ban-panel-v13');
 client.login(TOKEN);
